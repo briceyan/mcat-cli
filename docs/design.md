@@ -24,8 +24,8 @@ Design priorities:
 ## Command Surface (v1)
 
 ```bash
-mcat [GLOBAL_OPTS] auth ENDPOINT -k KEY_REF [-o OUT_KEY_REF] [--state AUTH_STATE_FILE] [--wait]
-mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE [-o OUT_KEY_REF]
+mcat [GLOBAL_OPTS] auth ENDPOINT -k KEY_REF [-o [OUT_KEY_REF]] [--state AUTH_STATE_FILE] [--wait]
+mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE [-o [OUT_KEY_REF]]
 
 mcat [GLOBAL_OPTS] init ENDPOINT -k KEY_REF -o SESS_INFO_FILE
 
@@ -40,6 +40,13 @@ Notes:
 - `tool call` includes `TOOL_NAME` explicitly.
 - `SESS_INFO_FILE` is created by `init` and reused by `tool` commands.
 - `auth` defaults to non-blocking behavior; pass `--wait` to block/poll until completion.
+- `auth` output key behavior:
+  - no `-o`: do not overwrite any key ref
+  - `-o` (no value): overwrite the input `-k` key ref
+  - `-o KEY_REF`: write to a different key ref
+- CLI parsing should be flexible about option positions:
+  - command/subcommand options may appear before or after positional arguments (when unambiguous)
+  - known root/global logging options may appear after subcommands/arguments and are normalized before parse
 
 ## JSON Output Contract
 
@@ -144,11 +151,19 @@ Supported forms:
 - `env://VAR`
 - `.env://path:VAR`
 - `json://path`
+- bare file path (shorthand for `json://path`)
 
 ### Semantics
 
 - `-k / --key-ref`: read input key/token from reference
 - `-o / --out-key-ref`: write output key/token to reference
+
+Auth-specific behavior:
+
+- `-k` may point to a non-existent key ref on first-time auth
+- if `-o` is omitted, auth returns the token but does not overwrite `-k`
+- if `-o` is present without a value, auth overwrites `-k`
+- if `-o` has a value, auth writes to that output key ref
 
 Constraints:
 

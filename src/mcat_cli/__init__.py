@@ -1,2 +1,7 @@
 def main() -> None:
-    print("Hello from mcat-cli!")
+    from .app import main as app_main
+
+    app_main()
+
+
+__all__ = ["main"]
