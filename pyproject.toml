@@ -1,0 +1,17 @@
+[project]
+name = "mcat-cli"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Brice", email = "briceyan3.0@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+mcat-cli = "mcat_cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
