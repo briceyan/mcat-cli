@@ -17,7 +17,9 @@ def list_tools(*, sess_info_file: str) -> dict[str, Any]:
     raise NotImplementedError("tool listing is not implemented yet")
 
 
-def call_tool(*, tool_name: str, args_input: str, sess_info_file: str) -> dict[str, Any]:
+def call_tool(
+    *, tool_name: str, args_input: str, sess_info_file: str
+) -> dict[str, Any]:
     LOGGER.info("mcp.tool.call requested tool_name=%s", tool_name)
     _ = (args_input, sess_info_file)
     raise NotImplementedError("tool call is not implemented yet")

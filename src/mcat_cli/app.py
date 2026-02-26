@@ -305,7 +305,11 @@ def _normalize_auth_start_alias(argv: list[str]) -> list[str]:
             j += 2
             continue
 
-        if token.startswith("--key-ref=") or token.startswith("--out-key-ref=") or token.startswith("--state="):
+        if (
+            token.startswith("--key-ref=")
+            or token.startswith("--out-key-ref=")
+            or token.startswith("--state=")
+        ):
             j += 1
             continue
 

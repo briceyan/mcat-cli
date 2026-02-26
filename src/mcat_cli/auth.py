@@ -172,7 +172,9 @@ def _start_auth_device(
         client_cfg=client_cfg,
     )
 
-    resolved_state_file = state_file or _default_auth_state_file() if not wait else state_file
+    resolved_state_file = (
+        state_file or _default_auth_state_file() if not wait else state_file
+    )
     state_doc = _build_auth_state_doc(
         endpoint=endpoint,
         input_key_ref=key_ref,
@@ -189,7 +191,9 @@ def _start_auth_device(
         _print_wait_instructions(device_flow)
         token_payload = _poll_until_complete(
             state_doc["state"],
-            rewrite_state=(resolved_state_file, state_doc) if resolved_state_file else None,
+            rewrite_state=(resolved_state_file, state_doc)
+            if resolved_state_file
+            else None,
         )
         return _finalize_token_result(token_payload, out_key_ref=out_key_ref)
 
@@ -265,8 +269,10 @@ def _start_auth_authorization_code(
             redirect_uri=callback.redirect_uri,
             state=state_nonce,
             code_challenge=code_challenge,
-            scope=_as_optional_str(oauth_meta.get("challenged_scope")) or client_cfg.scope,
-            resource=_as_optional_str(oauth_meta.get("resource")) or client_cfg.resource,
+            scope=_as_optional_str(oauth_meta.get("challenged_scope"))
+            or client_cfg.scope,
+            resource=_as_optional_str(oauth_meta.get("resource"))
+            or client_cfg.resource,
         )
 
         state_doc = _build_auth_code_state_doc(
@@ -285,7 +291,9 @@ def _start_auth_authorization_code(
             _write_auth_state_file(state_file, state_doc)
 
         _print_wait_instructions({"verification_uri_complete": auth_url})
-        callback_result = _wait_for_oauth_callback(callback, timeout_s=AUTH_CODE_TIMEOUT_S)
+        callback_result = _wait_for_oauth_callback(
+            callback, timeout_s=AUTH_CODE_TIMEOUT_S
+        )
         token_payload = _exchange_authorization_code(
             token_endpoint=token_endpoint,
             code=callback_result["code"],
@@ -293,7 +301,8 @@ def _start_auth_authorization_code(
             client_secret=registration.get("client_secret"),
             redirect_uri=callback.redirect_uri,
             code_verifier=code_verifier,
-            resource=_as_optional_str(oauth_meta.get("resource")) or client_cfg.resource,
+            resource=_as_optional_str(oauth_meta.get("resource"))
+            or client_cfg.resource,
         )
 
         if state_file:
@@ -334,7 +343,9 @@ def _continue_auth_authorization_code(
             out_key_ref_self=out_key_ref_self,
         )
         _print_wait_instructions({"verification_uri_complete": authorization_url})
-        callback_result = _wait_for_oauth_callback(callback, timeout_s=AUTH_CODE_TIMEOUT_S)
+        callback_result = _wait_for_oauth_callback(
+            callback, timeout_s=AUTH_CODE_TIMEOUT_S
+        )
         token_payload = _exchange_authorization_code(
             token_endpoint=_require_state_str(state, "token_endpoint"),
             code=callback_result["code"],
@@ -391,7 +402,9 @@ def _pending_result(*, state_file: str, state: dict[str, Any]) -> dict[str, Any]
     return result
 
 
-def _finalize_token_result(token_payload: dict[str, Any], *, out_key_ref: str | None) -> dict[str, Any]:
+def _finalize_token_result(
+    token_payload: dict[str, Any], *, out_key_ref: str | None
+) -> dict[str, Any]:
     normalized = _normalize_token_payload(token_payload)
     if out_key_ref:
         _write_key_ref(out_key_ref, normalized)
@@ -620,7 +633,11 @@ def _resolve_client_for_authorization_code(
 
     return {
         "client_id": client_cfg.client_id,
-        **({"client_secret": client_cfg.client_secret} if client_cfg.client_secret else {}),
+        **(
+            {"client_secret": client_cfg.client_secret}
+            if client_cfg.client_secret
+            else {}
+        ),
     }
 
 
@@ -646,9 +663,9 @@ def _register_dynamic_client(
         )
     except HttpJsonError as exc:
         payload_obj = exc.payload if isinstance(exc.payload, dict) else {}
-        msg = _as_optional_str(payload_obj.get("error_description")) or _as_optional_str(
-            payload_obj.get("error")
-        )
+        msg = _as_optional_str(
+            payload_obj.get("error_description")
+        ) or _as_optional_str(payload_obj.get("error"))
         if msg:
             raise ValueError(f"dynamic client registration failed: {msg}") from None
         raise ValueError(
@@ -674,7 +691,9 @@ def _build_auth_code_state_doc(
 ) -> dict[str, Any]:
     state: dict[str, Any] = {
         "issuer": _require_state_like(oauth_meta, "issuer"),
-        "authorization_endpoint": _require_state_like(oauth_meta, "authorization_endpoint"),
+        "authorization_endpoint": _require_state_like(
+            oauth_meta, "authorization_endpoint"
+        ),
         "token_endpoint": _require_state_like(oauth_meta, "token_endpoint"),
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -816,7 +835,9 @@ def _wait_for_oauth_callback(
     timeout_s: float,
 ) -> dict[str, str]:
     if not handle.event.wait(timeout_s):
-        raise TimeoutError(f"timed out waiting for OAuth callback on {handle.redirect_uri}")
+        raise TimeoutError(
+            f"timed out waiting for OAuth callback on {handle.redirect_uri}"
+        )
 
     callback_state = handle.result.get("state")
     callback_error = handle.result.get("error")
@@ -841,7 +862,9 @@ def _stop_oauth_callback_listener(handle: OAuthCallbackServerHandle) -> None:
         handle.server.server_close()
     finally:
         handle.thread.join(timeout=2.0)
-        LOGGER.info("auth.callback_listener stopped redirect_uri=%s", handle.redirect_uri)
+        LOGGER.info(
+            "auth.callback_listener stopped redirect_uri=%s", handle.redirect_uri
+        )
 
 
 def _exchange_authorization_code(
@@ -904,7 +927,9 @@ def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
         try:
             meta = _http_json("GET", url)
         except Exception as exc:
-            LOGGER.info("auth.discovery protected-resource miss url=%s err=%s", url, exc)
+            LOGGER.info(
+                "auth.discovery protected-resource miss url=%s err=%s", url, exc
+            )
             continue
         if isinstance(meta, dict):
             if not discovered_resource:
@@ -947,10 +972,14 @@ def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
             if not isinstance(meta, dict):
                 continue
             token_endpoint = _as_optional_str(meta.get("token_endpoint"))
-            authorization_endpoint = _as_optional_str(meta.get("authorization_endpoint"))
+            authorization_endpoint = _as_optional_str(
+                meta.get("authorization_endpoint")
+            )
             device_endpoint = _as_optional_str(
                 meta.get("device_authorization_endpoint")
-            ) or _as_optional_str(meta.get("device_authorization_endpoint".replace("_", "-")))
+            ) or _as_optional_str(
+                meta.get("device_authorization_endpoint".replace("_", "-"))
+            )
             registration_endpoint = _as_optional_str(meta.get("registration_endpoint"))
             issuer_from_meta = _as_optional_str(meta.get("issuer")) or issuer
             if token_endpoint and not (device_endpoint or authorization_endpoint):
@@ -1060,7 +1089,9 @@ def _probe_mcp_auth(endpoint: str) -> dict[str, str]:
         text = exc.read().decode("utf-8", errors="replace")
     except urlerror.URLError as exc:
         reason = getattr(exc, "reason", exc)
-        LOGGER.info("auth.discovery mcp-probe miss endpoint=%s err=%s", endpoint, reason)
+        LOGGER.info(
+            "auth.discovery mcp-probe miss endpoint=%s err=%s", endpoint, reason
+        )
         return {}
 
     LOGGER.info("auth.http POST %s -> %s", endpoint, status)
@@ -1299,7 +1330,9 @@ def _load_client_config_from_key_ref(key_ref_raw: str) -> ClientConfig:
 
     if not isinstance(payload, dict):
         # KEY_REF typically stores an access token; ignore and use the default public client.
-        LOGGER.info("auth.client using default public client id (no client config in key ref)")
+        LOGGER.info(
+            "auth.client using default public client id (no client config in key ref)"
+        )
         return _default_client_config()
 
     client_id = _as_optional_str(payload.get("client_id"))
@@ -1399,17 +1432,25 @@ def _read_key_ref(raw: str) -> Any:
 def _write_key_ref(raw: str, payload: Any) -> None:
     ref = _parse_key_ref(raw)
     if ref.kind == "env":
-        raise ValueError("env:// KEY_REF is read-only; use .env:// or json:// for output")
+        raise ValueError(
+            "env:// KEY_REF is read-only; use .env:// or json:// for output"
+        )
 
     if ref.kind == "json":
         assert ref.path is not None
-        content = json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+        content = (
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+        )
         write_text_atomic(ref.path, content)
         return
 
     if ref.kind == "dotenv":
         assert ref.path is not None and ref.name is not None
-        value = payload if isinstance(payload, str) else json.dumps(payload, separators=(",", ":"))
+        value = (
+            payload
+            if isinstance(payload, str)
+            else json.dumps(payload, separators=(",", ":"))
+        )
         _write_dotenv_var(ref.path, ref.name, value)
         return
 
@@ -1486,7 +1527,7 @@ def _maybe_parse_json_scalar(text: str) -> Any:
     stripped = text.strip()
     if not stripped:
         return ""
-    if stripped[0] in "{[\"" or stripped in {"true", "false", "null"}:
+    if stripped[0] in '{["' or stripped in {"true", "false", "null"}:
         try:
             return json.loads(stripped)
         except json.JSONDecodeError:
@@ -1530,9 +1571,9 @@ def _require_state_file_for_pending(path: str | None) -> str:
 
 
 def _print_wait_instructions(device_flow: dict[str, Any]) -> None:
-    url = _as_optional_str(device_flow.get("verification_uri_complete")) or _as_optional_str(
-        device_flow.get("verification_uri")
-    )
+    url = _as_optional_str(
+        device_flow.get("verification_uri_complete")
+    ) or _as_optional_str(device_flow.get("verification_uri"))
     code = _as_optional_str(device_flow.get("user_code"))
     if not url and not code:
         return
