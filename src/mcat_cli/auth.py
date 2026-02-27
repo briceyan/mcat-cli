@@ -74,6 +74,7 @@ class ClientConfig:
     scope: str | None
     audience: str | None
     resource: str | None
+    use_dynamic_registration: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +366,7 @@ def _start_auth_authorization_code(
             oauth_meta=oauth_meta,
             client_cfg=client_cfg,
             redirect_uri=callback.redirect_uri,
+            key_ref=key_ref,
         )
 
         code_verifier = _generate_pkce_verifier()
@@ -692,18 +694,23 @@ def _resolve_client_for_authorization_code(
     oauth_meta: dict[str, str],
     client_cfg: ClientConfig,
     redirect_uri: str,
+    key_ref: str,
 ) -> dict[str, str]:
     registration_endpoint = _as_optional_str(oauth_meta.get("registration_endpoint"))
     if (
         registration_endpoint is not None
-        and client_cfg.client_id == DEFAULT_PUBLIC_CLIENT_ID
-        and client_cfg.client_secret is None
+        and client_cfg.use_dynamic_registration
     ):
-        reg = _register_dynamic_client(
-            registration_endpoint=registration_endpoint,
-            redirect_uri=redirect_uri,
-            client_name="mcat-cli",
-        )
+        try:
+            reg = _register_dynamic_client(
+                registration_endpoint=registration_endpoint,
+                redirect_uri=redirect_uri,
+                client_name="mcat-cli",
+            )
+        except HttpJsonError as exc:
+            raise ValueError(
+                _dynamic_client_registration_error_message(exc=exc, key_ref=key_ref)
+            ) from None
         client_id = _as_optional_str(reg.get("client_id"))
         if not client_id:
             raise ValueError("dynamic client registration returned no client_id")
@@ -712,6 +719,8 @@ def _resolve_client_for_authorization_code(
         if client_secret:
             result["client_secret"] = client_secret
         return result
+    if registration_endpoint is not None:
+        LOGGER.info("auth.client using configured static client; skipping dynamic registration")
 
     return {
         "client_id": client_cfg.client_id,
@@ -736,26 +745,34 @@ def _register_dynamic_client(
         "token_endpoint_auth_method": "none",
         "redirect_uris": [redirect_uri],
     }
-    try:
-        resp = _http_json(
-            "POST",
-            registration_endpoint,
-            json_body=payload,
-            extra_headers={"Accept": "application/json"},
-        )
-    except HttpJsonError as exc:
-        payload_obj = exc.payload if isinstance(exc.payload, dict) else {}
-        msg = _as_optional_str(
-            payload_obj.get("error_description")
-        ) or _as_optional_str(payload_obj.get("error"))
-        if msg:
-            raise ValueError(f"dynamic client registration failed: {msg}") from None
-        raise ValueError(
-            f"dynamic client registration failed (HTTP {exc.status})"
-        ) from None
+    resp = _http_json(
+        "POST",
+        registration_endpoint,
+        json_body=payload,
+        extra_headers={"Accept": "application/json"},
+    )
     if not isinstance(resp, dict):
         raise ValueError("invalid dynamic client registration response")
     return resp
+
+
+def _dynamic_client_registration_error_message(
+    *, exc: HttpJsonError, key_ref: str
+) -> str:
+    payload_obj = exc.payload if isinstance(exc.payload, dict) else {}
+    provider_msg = _as_optional_str(
+        payload_obj.get("error_description")
+    ) or _as_optional_str(payload_obj.get("error"))
+    if exc.status in {401, 403}:
+        detail = f": {provider_msg}" if provider_msg else ""
+        return (
+            f"dynamic client registration rejected by server (HTTP {exc.status}){detail}; "
+            f"configure --key-ref {key_ref} with OAuth client fields "
+            '{"client_id":"...","client_secret":"..."} and retry auth start'
+        )
+    if provider_msg:
+        return f"dynamic client registration failed: {provider_msg}"
+    return f"dynamic client registration failed (HTTP {exc.status})"
 
 
 def _build_auth_code_state_doc(
@@ -1532,6 +1549,7 @@ def _load_client_config_from_key_ref(key_ref_raw: str) -> ClientConfig:
         scope=scope,
         audience=_as_optional_str(payload.get("audience")),
         resource=_as_optional_str(payload.get("resource")),
+        use_dynamic_registration=False,
     )
 
 
@@ -1542,6 +1560,7 @@ def _default_client_config() -> ClientConfig:
         scope=None,
         audience=None,
         resource=None,
+        use_dynamic_registration=True,
     )
 
 
