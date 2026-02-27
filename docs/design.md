@@ -29,6 +29,10 @@ mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE [-o [OUT_KEY_REF]]
 
 mcat [GLOBAL_OPTS] init ENDPOINT -k KEY_REF -o SESS_INFO_FILE
 
+mcat [GLOBAL_OPTS] resource list -s SESS_INFO_FILE [--cursor CURSOR]
+mcat [GLOBAL_OPTS] resource read URI -s SESS_INFO_FILE [-o FILE]
+mcat [GLOBAL_OPTS] resource template list -s SESS_INFO_FILE [--cursor CURSOR]
+
 mcat [GLOBAL_OPTS] tool list -s SESS_INFO_FILE
 mcat [GLOBAL_OPTS] tool call TOOL_NAME -i ARGS -s SESS_INFO_FILE
 ```
@@ -38,7 +42,9 @@ Notes:
 - `auth` starts an authentication flow.
 - `auth continue` resumes a previously started auth flow (required for agent/interleaved usage).
 - `tool call` includes `TOOL_NAME` explicitly.
+- `resource read` includes `URI` explicitly and supports optional decoded output via `-o`.
 - `SESS_INFO_FILE` is created by `init` and reused by `tool` commands.
+- `SESS_INFO_FILE` is also reused by `resource` commands.
 - `auth` defaults to non-blocking behavior; pass `--wait` to block/poll until completion.
 - `auth` output key behavior:
   - no `-o`: do not overwrite any key ref
@@ -195,6 +201,115 @@ The parsed value is sent as tool arguments to the MCP server.
 
 For v1, `tool call` returns the raw MCP tool result in `result` (no normalization layer yet).
 
+## Resource Support Design (spec 2025-11-25)
+
+The MCP resources surface introduces:
+
+- discovery (`resources/list`)
+- content fetch (`resources/read`)
+- template discovery (`resources/templates/list`)
+- optional subscriptions (`resources/subscribe`, `resources/unsubscribe`)
+- optional notifications (`notifications/resources/list_changed`, `notifications/resources/updated`)
+
+### v1.1 command design
+
+```bash
+mcat resource list -s SESS_INFO_FILE [--cursor CURSOR]
+mcat resource read URI -s SESS_INFO_FILE [-o FILE]
+mcat resource template list -s SESS_INFO_FILE [--cursor CURSOR]
+```
+
+Mapping:
+
+- `resource list` -> `resources/list` with optional pagination cursor.
+- `resource read` -> `resources/read` with `uri` and output-mode switch via `-o`.
+- `resource template list` -> `resources/templates/list` with optional cursor.
+
+Output policy (same CLI contract):
+
+- `resource list` result: raw `{resources, nextCursor?}`.
+- `resource read` result (no `-o`): raw `{contents}` where each item is text/blob content.
+- `resource template list` result: raw `{resourceTemplates, nextCursor?}`.
+
+`resource read` output-mode details:
+
+- no `-o`:
+  - default agent mode
+  - emit normal JSON result on `stdout` (`{"ok":true,"result":{"contents":[...]}}`)
+- `-o FILE` (`FILE != -`):
+  - decode MCP content and write decoded bytes to `FILE`
+  - emit JSON status payload on `stdout` (for example saved path + byte count)
+- `-o -`:
+  - decode MCP content and write decoded bytes directly to `stdout`
+  - intended for human pipe workflows (for example `... | pbcopy` or `... > file`)
+  - this is an explicit exception to the default JSON-on-stdout contract
+
+Decode rules for `resource read -o ...`:
+
+- if content item has `text`, write UTF-8 bytes of `text`
+- if content item has `blob`, base64-decode and write raw bytes
+- if `contents` has exactly one item, decode it
+- if `contents` has multiple items, return JSON error and require future explicit item selection
+
+### Capability gating
+
+During `init`, capture and persist `initialize.result.capabilities`.
+
+Runtime checks:
+
+- If server does not advertise `capabilities.resources`, fail resource commands with:
+  - `{"ok":false,"error":"server does not advertise resources capability"}`
+- For future subscription commands, require `capabilities.resources.subscribe == true`.
+- For list-change watch support, require `capabilities.resources.listChanged == true`.
+
+### Session schema extension
+
+Extend `SESS_INFO_FILE` with optional server handshake metadata:
+
+```json
+{
+  "version": 1,
+  "session_id": "server-session-id",
+  "key_ref": "json:///path/to/token.json",
+  "endpoint": "https://example.com/mcp",
+  "protocol_version": "2025-11-05",
+  "server_capabilities": {
+    "resources": {
+      "listChanged": true,
+      "subscribe": false
+    }
+  }
+}
+```
+
+Notes:
+
+- Keep `version` at `1`; new fields are optional/backward-compatible.
+- If metadata is missing (older session files), commands may proceed and rely on JSON-RPC method errors.
+
+### Transport and concurrency behavior
+
+- Reuse the existing one-request-per-command pattern.
+- Continue to send `Mcp-Session-Id` and persist rotated session ids from response headers.
+- Pagination remains explicit via `--cursor` and returned `nextCursor`.
+- Continue lock+atomic writes when session file updates are needed.
+
+### Subscriptions (phased design)
+
+Because the current CLI model is one-shot, async notifications are not very useful without a long-lived stream.
+
+Phase A (now):
+
+- Implement `list`, `read`, `template list` only.
+- Do not expose `subscribe`/`unsubscribe` yet.
+- Do not add a template expansion command in this phase.
+
+Phase B (later, if needed):
+
+- Add `mcat resource watch URI -s SESS_INFO_FILE`.
+- `watch` sends `resources/subscribe`, then consumes SSE notifications until interrupted.
+- Optional `--read-on-update` to auto-run `resources/read` when update notifications arrive.
+
 ## Session Info File (`SESS_INFO_FILE`)
 
 `mcat init` writes a session file used by `tool` commands.
@@ -306,6 +421,7 @@ Typer is the preferred framework for v1.
 
 - Root app: global logging options and shared context
 - `auth` sub-app: start/resume authentication
+- `resource` sub-app: list/read/templates (and optional watch later)
 - `tool` sub-app: list/call tools
 - `init` command: create session file
 
@@ -331,6 +447,7 @@ Implementation should remain small, with three main modules:
   - auth provider HTTP calls
 - `src/mcat_cli/mcp.py`
   - session initialization
+  - resource listing/reading/template listing
   - tool listing/calling
   - MCP transport and request/response logging
 
@@ -359,8 +476,9 @@ Keep v1 intentionally narrow:
 3. `auth` start/continue with a stubbed provider contract
 4. `init` session file creation
 5. `tool list` / `tool call` MCP transport integration
-6. File locking + atomic write hardening
-7. Docs/examples and smoke tests
+6. `resource list` / `resource read` / `resource template list`
+7. File locking + atomic write hardening
+8. Docs/examples and smoke tests
 
 ## Feedback (Applied)
 
@@ -371,3 +489,4 @@ The following feedback has been incorporated into this document:
 3. Define `json://path` token storage as a JSON object (for example `access_token`, `refresh_token`, expiry fields).
 4. Return raw `tool call` results in v1 (defer normalization).
 5. Rename `SESSION_FILE` to `SESS_INFO_FILE` to align better with `AUTH_STATE_FILE`.
+6. Add MCP resources support in phases, with list/read/templates first and streaming subscriptions later.

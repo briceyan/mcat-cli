@@ -27,6 +27,26 @@ def write_text_atomic(path: str | Path, content: str) -> None:
         raise
 
 
+def write_bytes_atomic(path: str | Path, content: bytes) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    try:
+        with os.fdopen(fd, "wb") as file_obj:
+            file_obj.write(content)
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 @contextmanager
 def locked_file(path: str | Path, mode: str = "a+") -> Iterator[TextIO]:
     import fcntl

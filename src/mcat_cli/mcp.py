@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
@@ -10,7 +12,7 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from .util.files import locked_file, write_text_atomic
+from .util.files import locked_file, write_bytes_atomic, write_text_atomic
 
 LOGGER = logging.getLogger("mcat.mcp")
 
@@ -35,6 +37,7 @@ def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[st
     }
     init_resp = _post_jsonrpc(normalized_endpoint, token, init_payload)
     _raise_jsonrpc_error(init_resp["messages"])
+    init_result = _extract_first_result(init_resp["messages"])
     session_id = _as_optional_str(init_resp["headers"].get("mcp-session-id"))
 
     initialized_payload = {
@@ -63,6 +66,13 @@ def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[st
         "key_ref": normalized_key_ref,
         "endpoint": normalized_endpoint,
     }
+    if isinstance(init_result, dict):
+        protocol_version = _as_optional_str(init_result.get("protocolVersion"))
+        if protocol_version:
+            session_doc["protocol_version"] = protocol_version
+        server_capabilities = init_result.get("capabilities")
+        if isinstance(server_capabilities, dict):
+            session_doc["server_capabilities"] = server_capabilities
     _write_session_doc(sess_info_file, session_doc)
     return {
         "session_id": session_doc["session_id"],
@@ -72,40 +82,19 @@ def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[st
 
 def list_tools(*, sess_info_file: str) -> dict[str, Any]:
     LOGGER.info("mcp.tool.list requested sess_info_file=%s", sess_info_file)
-    session_doc = _read_session_doc(sess_info_file)
-    endpoint = _normalize_url(
-        _require_str(session_doc.get("endpoint"), "endpoint"), field="endpoint"
+    rpc = _invoke_session_method(
+        sess_info_file=sess_info_file,
+        method="tools/list",
+        request_id=2,
+        params={},
     )
-    key_ref = _normalize_key_ref(_require_str(session_doc.get("key_ref"), "key_ref"))
-    token = _resolve_access_token_from_key_ref(key_ref)
-    existing_session_id = _as_optional_str(session_doc.get("session_id"))
-    if not existing_session_id:
-        raise ValueError("session info file is missing session_id; run `mcat init`")
-
-    list_payload = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
-    list_resp = _post_jsonrpc(
-        endpoint,
-        token,
-        list_payload,
-        session_id=existing_session_id,
-    )
-    _raise_jsonrpc_error(list_resp["messages"])
-    active_session_id = _as_optional_str(
-        list_resp["headers"].get("mcp-session-id")
-    ) or existing_session_id
-
-    if active_session_id and active_session_id != existing_session_id:
-        session_doc["session_id"] = active_session_id
-        _write_session_doc(sess_info_file, session_doc)
-
-    tools = _extract_tools(list_resp["messages"])
+    tools = _extract_tools(rpc["messages"])
     result: dict[str, Any]
     if tools is not None:
         result = {"tools": tools}
     else:
-        result = {"messages": list_resp["messages"]}
-    if active_session_id:
-        result["session_id"] = active_session_id
+        result = {"messages": rpc["messages"]}
+    result["session_id"] = rpc["session_id"]
     return result
 
 
@@ -118,46 +107,234 @@ def call_tool(
         raise ValueError("TOOL_NAME is required")
     arguments = _parse_tool_arguments(args_input)
 
-    session_doc = _read_session_doc(sess_info_file)
-    endpoint = _normalize_url(
-        _require_str(session_doc.get("endpoint"), "endpoint"), field="endpoint"
+    rpc = _invoke_session_method(
+        sess_info_file=sess_info_file,
+        method="tools/call",
+        request_id=4,
+        params={"name": name, "arguments": arguments},
     )
-    key_ref = _normalize_key_ref(_require_str(session_doc.get("key_ref"), "key_ref"))
-    token = _resolve_access_token_from_key_ref(key_ref)
-    existing_session_id = _as_optional_str(session_doc.get("session_id"))
-    if not existing_session_id:
-        raise ValueError("session info file is missing session_id; run `mcat init`")
-
-    call_payload = {
-        "jsonrpc": "2.0",
-        "id": 4,
-        "method": "tools/call",
-        "params": {
-            "name": name,
-            "arguments": arguments,
-        },
-    }
-    call_resp = _post_jsonrpc(
-        endpoint,
-        token,
-        call_payload,
-        session_id=existing_session_id,
-    )
-    _raise_jsonrpc_error(call_resp["messages"])
-    active_session_id = _as_optional_str(
-        call_resp["headers"].get("mcp-session-id")
-    ) or existing_session_id
-
-    if active_session_id and active_session_id != existing_session_id:
-        session_doc["session_id"] = active_session_id
-        _write_session_doc(sess_info_file, session_doc)
-
-    raw_result = _extract_first_result(call_resp["messages"])
+    raw_result = _extract_first_result(rpc["messages"])
     if raw_result is None:
-        return {"messages": call_resp["messages"]}
+        return {"messages": rpc["messages"]}
     if isinstance(raw_result, dict):
         return raw_result
     return {"value": raw_result}
+
+
+def list_resources(*, sess_info_file: str, cursor: str | None = None) -> dict[str, Any]:
+    LOGGER.info("mcp.resource.list requested sess_info_file=%s", sess_info_file)
+    params: dict[str, Any] = {}
+    if cursor is not None and cursor.strip():
+        params["cursor"] = cursor.strip()
+    rpc = _invoke_session_method(
+        sess_info_file=sess_info_file,
+        method="resources/list",
+        request_id=10,
+        params=params,
+        require_resources=True,
+    )
+    return _result_with_session_id(rpc["messages"], rpc["session_id"])
+
+
+def list_resource_templates(
+    *, sess_info_file: str, cursor: str | None = None
+) -> dict[str, Any]:
+    LOGGER.info("mcp.resource.template.list requested sess_info_file=%s", sess_info_file)
+    params: dict[str, Any] = {}
+    if cursor is not None and cursor.strip():
+        params["cursor"] = cursor.strip()
+    rpc = _invoke_session_method(
+        sess_info_file=sess_info_file,
+        method="resources/templates/list",
+        request_id=11,
+        params=params,
+        require_resources=True,
+    )
+    return _result_with_session_id(rpc["messages"], rpc["session_id"])
+
+
+def read_resource(*, uri: str, sess_info_file: str) -> dict[str, Any]:
+    LOGGER.info("mcp.resource.read requested uri=%s", uri)
+    resolved_uri = _normalize_resource_uri(uri)
+    rpc = _invoke_session_method(
+        sess_info_file=sess_info_file,
+        method="resources/read",
+        request_id=12,
+        params={"uri": resolved_uri},
+        require_resources=True,
+    )
+    return _result_with_session_id(rpc["messages"], rpc["session_id"])
+
+
+def read_resource_decoded_bytes(
+    *, uri: str, sess_info_file: str
+) -> tuple[bytes, dict[str, Any]]:
+    LOGGER.info("mcp.resource.read.decode requested uri=%s", uri)
+    resolved_uri = _normalize_resource_uri(uri)
+    rpc = _invoke_session_method(
+        sess_info_file=sess_info_file,
+        method="resources/read",
+        request_id=12,
+        params={"uri": resolved_uri},
+        require_resources=True,
+    )
+    result = _extract_first_result(rpc["messages"])
+    if not isinstance(result, dict):
+        raise ValueError("invalid resources/read response: missing result object")
+
+    data, content_meta = _decode_single_resource_content(result, requested_uri=resolved_uri)
+    return data, {
+        "uri": content_meta["uri"],
+        "mime_type": content_meta["mime_type"],
+        "content_index": content_meta["content_index"],
+        "content_kind": content_meta["content_kind"],
+        "session_id": rpc["session_id"],
+    }
+
+
+def save_resource(
+    *, uri: str, sess_info_file: str, out_file: str
+) -> dict[str, Any]:
+    target = out_file.strip()
+    if not target or target == "-":
+        raise ValueError("FILE must be a path when using decoded output")
+
+    data, meta = read_resource_decoded_bytes(uri=uri, sess_info_file=sess_info_file)
+    try:
+        write_bytes_atomic(target, data)
+    except OSError as exc:
+        raise ValueError(f"unable to write decoded resource file {target}: {exc}") from None
+
+    return {
+        "saved": str(Path(target)),
+        "bytes": len(data),
+        "uri": meta["uri"],
+        "mime_type": meta["mime_type"],
+        "content_index": meta["content_index"],
+        "content_kind": meta["content_kind"],
+        "session_id": meta["session_id"],
+    }
+
+
+def _invoke_session_method(
+    *,
+    sess_info_file: str,
+    method: str,
+    request_id: int | None,
+    params: dict[str, Any] | None,
+    require_resources: bool = False,
+) -> dict[str, Any]:
+    session_doc, endpoint, token, existing_session_id = _load_active_session(
+        sess_info_file
+    )
+    if require_resources:
+        _require_resources_capability(session_doc)
+
+    payload: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params if params is not None else {},
+    }
+    if request_id is not None:
+        payload["id"] = request_id
+
+    resp = _post_jsonrpc(endpoint, token, payload, session_id=existing_session_id)
+    _raise_jsonrpc_error(resp["messages"])
+    active_session_id = (
+        _as_optional_str(resp["headers"].get("mcp-session-id")) or existing_session_id
+    )
+
+    if active_session_id != existing_session_id:
+        session_doc["session_id"] = active_session_id
+        _write_session_doc(sess_info_file, session_doc)
+
+    return {"messages": resp["messages"], "session_id": active_session_id}
+
+
+def _load_active_session(sess_info_file: str) -> tuple[dict[str, Any], str, str, str]:
+    session_doc = _read_session_doc(sess_info_file)
+    endpoint = _normalize_url(
+        _require_str(session_doc.get("endpoint"), "endpoint"),
+        field="endpoint",
+    )
+    key_ref = _normalize_key_ref(_require_str(session_doc.get("key_ref"), "key_ref"))
+    token = _resolve_access_token_from_key_ref(key_ref)
+    session_id = _as_optional_str(session_doc.get("session_id"))
+    if not session_id:
+        raise ValueError("session info file is missing session_id; run `mcat init`")
+    return session_doc, endpoint, token, session_id
+
+
+def _require_resources_capability(session_doc: dict[str, Any]) -> None:
+    capabilities = session_doc.get("server_capabilities")
+    if capabilities is None or not isinstance(capabilities, dict):
+        return
+    resources = capabilities.get("resources")
+    if isinstance(resources, dict) or resources is True:
+        return
+    raise ValueError("server does not advertise resources capability")
+
+
+def _result_with_session_id(
+    messages: list[dict[str, Any]], session_id: str
+) -> dict[str, Any]:
+    raw_result = _extract_first_result(messages)
+    result: dict[str, Any]
+    if isinstance(raw_result, dict):
+        result = dict(raw_result)
+    elif raw_result is not None:
+        result = {"value": raw_result}
+    else:
+        result = {"messages": messages}
+    result["session_id"] = session_id
+    return result
+
+
+def _decode_single_resource_content(
+    result: dict[str, Any], *, requested_uri: str
+) -> tuple[bytes, dict[str, Any]]:
+    contents = result.get("contents")
+    if not isinstance(contents, list):
+        raise ValueError("invalid resources/read response: missing contents")
+    if len(contents) != 1:
+        raise ValueError(
+            "resources/read returned multiple content items; decoded output requires exactly one item"
+        )
+
+    item = contents[0]
+    if not isinstance(item, dict):
+        raise ValueError("invalid resources/read response: content item is not an object")
+
+    has_text = isinstance(item.get("text"), str)
+    has_blob = isinstance(item.get("blob"), str)
+    if has_text and has_blob:
+        raise ValueError("invalid resources/read response: content item has both text and blob")
+
+    if has_text:
+        data = item["text"].encode("utf-8")
+        content_kind = "text"
+    elif has_blob:
+        try:
+            data = base64.b64decode(item["blob"], validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("invalid resources/read response: content blob is not valid base64") from None
+        content_kind = "blob"
+    else:
+        raise ValueError("invalid resources/read response: content item has neither text nor blob")
+
+    return data, {
+        "uri": _as_optional_str(item.get("uri")) or requested_uri,
+        "mime_type": _as_optional_str(item.get("mimeType")),
+        "content_index": 0,
+        "content_kind": content_kind,
+    }
+
+
+def _normalize_resource_uri(value: str) -> str:
+    text = value.strip()
+    if not text:
+        raise ValueError("URI is required")
+    return text
 
 
 def _parse_tool_arguments(args_input: str) -> dict[str, Any]:

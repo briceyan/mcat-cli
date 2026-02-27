@@ -32,13 +32,15 @@ KNOWN_OPTS_WITH_VALUE = {
     "--session",
     "-i",
     "--input",
+    "--cursor",
 }
 AUTH_OUT_SELF_FLAG = "--out-key-ref-self"
 
 ROOT_COMMAND_ORDER = {
     "auth": 0,
     "init": 1,
-    "tool": 2,
+    "resource": 2,
+    "tool": 3,
 }
 
 
@@ -86,6 +88,22 @@ def _run_json_command(fn: Callable[[], Any]) -> None:
         APP_LOGGER.exception("Unhandled exception")
         emit_error("internal error")
     emit_success(result)
+
+
+def _run_binary_stdout_command(fn: Callable[[], bytes]) -> None:
+    try:
+        payload = fn()
+    except typer.Exit:
+        raise
+    except NotImplementedError as exc:
+        emit_error(str(exc) or "not implemented")
+    except ValueError as exc:
+        emit_error(str(exc) or "invalid input")
+    except Exception:
+        APP_LOGGER.exception("Unhandled exception")
+        emit_error("internal error")
+    sys.stdout.buffer.write(payload)
+    sys.stdout.buffer.flush()
 
 
 def _runtime(ctx: typer.Context) -> Runtime:
@@ -330,7 +348,7 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_enable=False,
-    help="Concise CLI for MCP authentication and tool calls.",
+    help="Concise CLI for MCP authentication, resources, and tool calls.",
 )
 auth_app = typer.Typer(
     no_args_is_help=True,
@@ -344,6 +362,18 @@ tool_app = typer.Typer(
     pretty_exceptions_enable=False,
     help="MCP tool commands.",
 )
+resource_app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_enable=False,
+    help="MCP resource commands.",
+)
+resource_template_app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_enable=False,
+    help="MCP resource template commands.",
+)
 init_app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
@@ -353,7 +383,9 @@ init_app = typer.Typer(
 )
 app.add_typer(auth_app, name="auth")
 app.add_typer(init_app, name="init")
+app.add_typer(resource_app, name="resource")
 app.add_typer(tool_app, name="tool")
+resource_app.add_typer(resource_template_app, name="template")
 
 
 @app.callback()
@@ -472,6 +504,98 @@ def init_command(
     _run_json_command(
         lambda: mcp_mod.init_session(
             endpoint=endpoint, key_ref=key_ref, sess_info_file=sess_info_file
+        )
+    )
+
+
+@resource_app.command("list", help="List resources available in the MCP session.")
+def resource_list(
+    ctx: typer.Context,
+    sess_info_file: str = typer.Option(
+        ...,
+        "-s",
+        "--session",
+        "--sess-info-file",
+        metavar="SESS_INFO_FILE",
+    ),
+    cursor: str | None = typer.Option(None, "--cursor", metavar="CURSOR"),
+) -> None:
+    _ = _runtime(ctx)
+    _run_json_command(
+        lambda: mcp_mod.list_resources(
+            sess_info_file=sess_info_file,
+            cursor=cursor,
+        )
+    )
+
+
+@resource_app.command("read", help="Read a resource by URI.")
+def resource_read(
+    ctx: typer.Context,
+    uri: str = typer.Argument(..., metavar="URI"),
+    sess_info_file: str = typer.Option(
+        ...,
+        "-s",
+        "--session",
+        "--sess-info-file",
+        metavar="SESS_INFO_FILE",
+    ),
+    out_file: str | None = typer.Option(
+        None,
+        "-o",
+        "--out",
+        metavar="FILE",
+        help="Write decoded content to FILE, or `-` for decoded stdout.",
+    ),
+) -> None:
+    _ = _runtime(ctx)
+    if out_file == "-":
+        _run_binary_stdout_command(
+            lambda: mcp_mod.read_resource_decoded_bytes(
+                uri=uri,
+                sess_info_file=sess_info_file,
+            )[0]
+        )
+        return
+
+    if out_file is None:
+        _run_json_command(
+            lambda: mcp_mod.read_resource(
+                uri=uri,
+                sess_info_file=sess_info_file,
+            )
+        )
+        return
+
+    _run_json_command(
+        lambda: mcp_mod.save_resource(
+            uri=uri,
+            sess_info_file=sess_info_file,
+            out_file=out_file,
+        )
+    )
+
+
+@resource_template_app.command(
+    "list",
+    help="List resource templates available in the MCP session.",
+)
+def resource_template_list(
+    ctx: typer.Context,
+    sess_info_file: str = typer.Option(
+        ...,
+        "-s",
+        "--session",
+        "--sess-info-file",
+        metavar="SESS_INFO_FILE",
+    ),
+    cursor: str | None = typer.Option(None, "--cursor", metavar="CURSOR"),
+) -> None:
+    _ = _runtime(ctx)
+    _run_json_command(
+        lambda: mcp_mod.list_resource_templates(
+            sess_info_file=sess_info_file,
+            cursor=cursor,
         )
     )
 
