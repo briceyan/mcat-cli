@@ -36,6 +36,9 @@ from .util.key_ref import (
     KeyRefNotFoundError,
 )
 from .util.key_ref import (
+    extract_access_token as _extract_access_token,
+)
+from .util.key_ref import (
     read_key_ref_value as _read_key_ref,
 )
 from .util.key_ref import (
@@ -101,6 +104,9 @@ def start_auth(
 ) -> dict[str, Any]:
     LOGGER.info("auth.start endpoint=%s wait=%s", endpoint, wait)
     endpoint = _normalize_url(endpoint, field="ENDPOINT")
+    existing = _existing_valid_token_result(endpoint=endpoint, key_ref=key_ref)
+    if existing is not None:
+        return existing
 
     client_cfg = _load_client_config_from_key_ref(key_ref)
     oauth_meta = _discover_oauth_metadata(endpoint)
@@ -129,6 +135,81 @@ def start_auth(
         )
 
     raise ValueError("unable to discover a supported OAuth login flow")
+
+
+def _existing_valid_token_result(*, endpoint: str, key_ref: str) -> dict[str, Any] | None:
+    token = _read_access_token_from_key_ref(key_ref)
+    if token is None:
+        return None
+    if not _is_token_valid_for_endpoint(endpoint=endpoint, token=token):
+        return None
+    LOGGER.info("auth.start token already valid; skipping authorization")
+    return {"status": "complete", "stored": key_ref, "already_valid": True}
+
+
+def _read_access_token_from_key_ref(key_ref_raw: str) -> str | None:
+    try:
+        payload = _read_key_ref(key_ref_raw)
+    except KeyRefNotFoundError:
+        return None
+    return _extract_access_token(payload)
+
+
+def _is_token_valid_for_endpoint(*, endpoint: str, token: str) -> bool:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "mcat-cli", "version": "0.1.0"},
+        },
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "User-Agent": "mcat-cli/0.1",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+    LOGGER.info("auth.token.check endpoint=%s", endpoint)
+    req = urlrequest.Request(url=endpoint, method="POST", data=body, headers=headers)
+    try:
+        with urlrequest.urlopen(req, timeout=30.0) as resp:
+            status = int(getattr(resp, "status", 200))
+            text = resp.read().decode("utf-8", errors="replace")
+    except urlerror.HTTPError as exc:
+        status = int(exc.code)
+        text = exc.read().decode("utf-8", errors="replace")
+        LOGGER.info("auth.token.check endpoint=%s -> %s", endpoint, status)
+        if status in {401, 403}:
+            return False
+        return not _contains_auth_failure_text(text)
+    except urlerror.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        LOGGER.info("auth.token.check endpoint=%s err=%s", endpoint, reason)
+        return False
+
+    LOGGER.info("auth.token.check endpoint=%s -> %s", endpoint, status)
+    if not 200 <= status < 300:
+        return False
+    return not _contains_auth_failure_text(text)
+
+
+def _contains_auth_failure_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "unauthorized",
+            "invalid token",
+            "invalid_token",
+            "authentication failed",
+            "access denied",
+            "forbidden",
+        )
+    )
 
 
 def continue_auth(

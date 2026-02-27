@@ -156,6 +156,44 @@ def list_resources(*, sess_info_file: str, cursor: str | None = None) -> dict[st
     return _result_with_session_id(rpc["messages"], rpc["session_id"])
 
 
+def list_prompts(*, sess_info_file: str, cursor: str | None = None) -> dict[str, Any]:
+    LOGGER.info("mcp.prompt.list requested sess_info_file=%s", sess_info_file)
+    params: dict[str, Any] = {}
+    if cursor is not None and cursor.strip():
+        params["cursor"] = cursor.strip()
+    rpc = _invoke_session_method(
+        sess_info_file=sess_info_file,
+        method="prompts/list",
+        request_id=13,
+        params=params,
+        require_prompts=True,
+    )
+    return _result_with_session_id(rpc["messages"], rpc["session_id"])
+
+
+def get_prompt(
+    *, prompt_name: str, args_input: str | None, sess_info_file: str
+) -> dict[str, Any]:
+    LOGGER.info("mcp.prompt.get requested prompt_name=%s", prompt_name)
+    name = prompt_name.strip()
+    if not name:
+        raise ValueError("PROMPT_NAME is required")
+
+    params: dict[str, Any] = {"name": name}
+    arguments = _parse_prompt_arguments(args_input)
+    if arguments is not None:
+        params["arguments"] = arguments
+
+    rpc = _invoke_session_method(
+        sess_info_file=sess_info_file,
+        method="prompts/get",
+        request_id=14,
+        params=params,
+        require_prompts=True,
+    )
+    return _result_with_session_id(rpc["messages"], rpc["session_id"])
+
+
 def list_resource_templates(
     *, sess_info_file: str, cursor: str | None = None
 ) -> dict[str, Any]:
@@ -247,12 +285,15 @@ def _invoke_session_method(
     request_id: int | None,
     params: dict[str, Any] | None,
     require_resources: bool = False,
+    require_prompts: bool = False,
 ) -> dict[str, Any]:
     session_doc, endpoint, token, existing_session_id = _load_active_session(
         sess_info_file
     )
     if require_resources:
         _require_resources_capability(session_doc)
+    if require_prompts:
+        _require_prompts_capability(session_doc)
 
     payload: dict[str, Any] = {
         "jsonrpc": "2.0",
@@ -297,6 +338,16 @@ def _require_resources_capability(session_doc: dict[str, Any]) -> None:
     if isinstance(resources, dict) or resources is True:
         return
     raise ValueError("server does not advertise resources capability")
+
+
+def _require_prompts_capability(session_doc: dict[str, Any]) -> None:
+    capabilities = session_doc.get("server_capabilities")
+    if capabilities is None or not isinstance(capabilities, dict):
+        return
+    prompts = capabilities.get("prompts")
+    if isinstance(prompts, dict) or prompts is True:
+        return
+    raise ValueError("server does not advertise prompts capability")
 
 
 def _result_with_session_id(
@@ -397,6 +448,18 @@ def _parse_tool_arguments(args_input: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("ARGS must be a JSON object")
     return parsed
+
+
+def _parse_prompt_arguments(args_input: str | None) -> dict[str, str] | None:
+    if args_input is None:
+        return None
+    parsed = _parse_tool_arguments(args_input)
+    arguments: dict[str, str] = {}
+    for key, value in parsed.items():
+        if not isinstance(value, str):
+            raise ValueError("ARGS for prompts/get must be a JSON object of strings")
+        arguments[key] = value
+    return arguments
 
 
 def _parse_json_or_json5(text: str, *, source: str) -> Any:

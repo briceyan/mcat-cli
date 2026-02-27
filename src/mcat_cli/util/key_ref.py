@@ -36,11 +36,12 @@ def parse_key_ref(raw: str) -> KeyRef:
     if value.startswith(".env://"):
         rest = value[len(".env://") :]
         if ":" not in rest:
-            raise ValueError("invalid KEY_REF: expected .env://path:VAR")
+            raise ValueError("invalid KEY_REF: expected .env://path:VAR or .env://:VAR")
         path, name = rest.rsplit(":", 1)
-        if not path.strip() or not name.strip():
-            raise ValueError("invalid KEY_REF: expected .env://path:VAR")
-        return KeyRef(kind="dotenv", path=path.strip(), name=name.strip(), raw=value)
+        dotenv_path = path.strip() or ".env"
+        if not name.strip():
+            raise ValueError("invalid KEY_REF: expected .env://path:VAR or .env://:VAR")
+        return KeyRef(kind="dotenv", path=dotenv_path, name=name.strip(), raw=value)
 
     if value.startswith("json://"):
         path = value[len("json://") :].strip()

@@ -33,6 +33,9 @@ mcat [GLOBAL_OPTS] resource list -s SESS_INFO_FILE [--cursor CURSOR]
 mcat [GLOBAL_OPTS] resource read URI -s SESS_INFO_FILE [-o FILE]
 mcat [GLOBAL_OPTS] resource list-template -s SESS_INFO_FILE [--cursor CURSOR]
 
+mcat [GLOBAL_OPTS] prompt list -s SESS_INFO_FILE [--cursor CURSOR]
+mcat [GLOBAL_OPTS] prompt get PROMPT_NAME -s SESS_INFO_FILE [-i ARGS]
+
 mcat [GLOBAL_OPTS] tool list -s SESS_INFO_FILE
 mcat [GLOBAL_OPTS] tool call TOOL_NAME -i ARGS -s SESS_INFO_FILE
 ```
@@ -43,9 +46,11 @@ Notes:
 - `auth start` begins a new authorization flow.
 - `auth continue` resumes a pending authorization flow.
 - `tool call` includes `TOOL_NAME` explicitly.
+- `prompt get` includes `PROMPT_NAME` explicitly.
 - `resource read` includes `URI` explicitly and supports optional decoded output via `-o`.
 - `SESS_INFO_FILE` is created by `init` and reused by `tool` commands.
 - `SESS_INFO_FILE` is also reused by `resource` commands.
+- `SESS_INFO_FILE` is also reused by `prompt` commands.
 - `--state AUTH_STATE_FILE` is required for `auth start` and `auth continue`.
 - `-k / --key-ref` is required for `auth start` and `auth continue`.
 - `auth` defaults to non-blocking behavior; pass `--wait` to block/poll until completion.
@@ -140,6 +145,7 @@ Supported forms:
 
 - `env://VAR`
 - `.env://path:VAR`
+- `.env://:VAR` (shortcut for `.env://.env:VAR`)
 - `json://path`
 - bare file path (shorthand for `json://path`)
 
@@ -184,6 +190,24 @@ Recommended fields:
 The parsed value is sent as tool arguments to the MCP server.
 
 For v1, `tool call` returns the raw MCP tool result in `result` (no normalization layer yet).
+
+## Prompt Arguments (`ARGS`)
+
+`mcat prompt get` accepts optional `-i/--input ARGS` with the same input forms:
+
+- `@file` -> load JSON/JSON5 from file
+- `@-` -> load JSON/JSON5 from stdin
+- inline JSON5 string -> parse directly
+
+Constraint for `prompts/get`:
+
+- parsed value must be a JSON object of string values (`{str: str}`)
+- non-string values should fail fast with a concise error
+
+Output policy:
+
+- return raw MCP `prompts/get` result in `result`
+- include current `session_id` in the command result payload
 
 ## Resource Support Design (spec 2025-11-25)
 
@@ -406,6 +430,7 @@ Typer is the preferred framework for v1.
 - Root app: global logging options and shared context
 - `auth` sub-app: start/continue OAuth authorization flows
 - `resource` sub-app: list/read/templates (and optional watch later)
+- `prompt` sub-app: list/get prompts
 - `tool` sub-app: list/call tools
 - `init` command: create session file
 
@@ -432,6 +457,7 @@ Implementation should remain small, with three main modules:
 - `src/mcat_cli/mcp.py`
   - session initialization
   - resource listing/reading/template listing
+  - prompt listing/fetching
   - tool listing/calling
   - MCP transport and request/response logging
 
@@ -461,8 +487,9 @@ Keep v1 intentionally narrow:
 4. `init` session file creation
 5. `tool list` / `tool call` MCP transport integration
 6. `resource list` / `resource read` / `resource list-template`
-7. File locking + atomic write hardening
-8. Docs/examples and smoke tests
+7. `prompt list` / `prompt get`
+8. File locking + atomic write hardening
+9. Docs/examples and smoke tests
 
 ## Feedback (Applied)
 
@@ -474,3 +501,4 @@ The following feedback has been incorporated into this document:
 4. Define `json://path` token storage as a JSON object (for example `access_token`, `refresh_token`, expiry fields).
 5. Return raw `tool call` results in v1 (defer normalization).
 6. Add MCP resources support in phases, with list/read/list-template first and streaming subscriptions later.
+7. Add prompt command support (`prompt list`, `prompt get`) with optional argument input.

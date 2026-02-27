@@ -7,6 +7,7 @@ The model-context access tool for agents and humans.
 - MCP session initialization
 - tool listing/calling
 - resource listing/reading
+- prompt listing/fetching
 
 ## Install
 
@@ -43,7 +44,7 @@ If `token.json` already exists, add `-o/--overwrite`.
 mcat init https://your-mcp-server.example/mcp -k token.json -o session.json
 ```
 
-4) Call MCP tools/resources:
+4) Call MCP tools/resources/prompts:
 
 ```bash
 mcat tool list -s session.json
@@ -52,6 +53,9 @@ mcat tool call my_tool -i '{"foo":"bar"}' -s session.json
 mcat resource list -s session.json
 mcat resource list-template -s session.json
 mcat resource read my://resource -s session.json
+
+mcat prompt list -s session.json
+mcat prompt get summarize -i '{"topic":"release notes"}' -s session.json
 ```
 
 ## KEY_REF Formats
@@ -59,6 +63,7 @@ mcat resource read my://resource -s session.json
 `-k/--key-ref` accepts:
 - `env://VAR`
 - `.env://path:VAR`
+- `.env://:VAR` (shortcut for `.env://.env:VAR`)
 - `json://path`
 - bare file path (same as `json://path`)
 

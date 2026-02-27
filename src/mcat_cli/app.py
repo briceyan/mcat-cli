@@ -85,6 +85,18 @@ ToolNameArg = Annotated[
 ToolInputOpt = Annotated[
     str, typer.Option("-i", "--input", metavar="ARGS", help="Tool call arguments.")
 ]
+PromptNameArg = Annotated[
+    str, typer.Argument(..., metavar="PROMPT_NAME", help="Prompt name.")
+]
+PromptInputOpt = Annotated[
+    str | None,
+    typer.Option(
+        "-i",
+        "--input",
+        metavar="ARGS",
+        help="Prompt arguments (JSON/JSON5 or @file).",
+    ),
+]
 
 ResourceUriArg = Annotated[
     str, typer.Argument(..., metavar="URI", help="Resource URI.")
@@ -272,6 +284,41 @@ def tool_call(
     )
 
 
+prompt_cmd = typer.Typer()
+
+
+@prompt_cmd.command("list", help="List prompts available.")
+def prompt_list(
+    ctx: typer.Context,
+    sess_info_file: SessionInfoFileOpt,
+    cursor: ResourceCursorOpt = None,
+) -> None:
+    _ = _runtime(ctx)
+    _run_json_command(
+        lambda: mcp_mod.list_prompts(
+            sess_info_file=sess_info_file,
+            cursor=cursor,
+        )
+    )
+
+
+@prompt_cmd.command("get", help="Get a prompt by name.")
+def prompt_get(
+    ctx: typer.Context,
+    prompt_name: PromptNameArg,
+    sess_info_file: SessionInfoFileOpt,
+    args_input: PromptInputOpt = None,
+) -> None:
+    _ = _runtime(ctx)
+    _run_json_command(
+        lambda: mcp_mod.get_prompt(
+            prompt_name=prompt_name,
+            args_input=args_input,
+            sess_info_file=sess_info_file,
+        )
+    )
+
+
 def parse_global_opts(
     ctx: typer.Context,
     log_specs: LogSpecsOpt = None,
@@ -302,6 +349,7 @@ app.add_typer(auth_cmd, name="auth", help="Authorize MCP server access.", **conf
 app.add_typer(init_cmd, name="init", help="Initialize MCP sessions.", **conf)
 app.add_typer(tool_cmd, name="tool", help="Use MCP tools.", **conf)
 app.add_typer(resource_cmd, name="resource", help="Use MCP resources.", **conf)
+app.add_typer(prompt_cmd, name="prompt", help="Use MCP prompts.", **conf)
 
 
 def _json_dump(value: dict[str, Any]) -> str:
