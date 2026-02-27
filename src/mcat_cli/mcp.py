@@ -4,15 +4,34 @@ import base64
 import binascii
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any
 from urllib import error as urlerror
-from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from .util.files import locked_file, write_bytes_atomic, write_text_atomic
+from .util.atomic_files import write_bytes_atomic
+from .util.common import (
+    as_optional_str as _as_optional_str,
+)
+from .util.common import (
+    normalize_url as _normalize_url,
+)
+from .util.key_ref import (
+    extract_access_token as _extract_access_token,
+)
+from .util.key_ref import (
+    normalize_key_ref as _normalize_key_ref,
+)
+from .util.key_ref import (
+    read_key_ref_value as _read_key_ref_value,
+)
+from .util.session_info import (
+    read_session_info as _read_session_info,
+)
+from .util.session_info import (
+    write_session_info as _write_session_info,
+)
 
 LOGGER = logging.getLogger("mcat.mcp")
 
@@ -52,9 +71,10 @@ def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[st
         session_id=session_id,
     )
     _raise_jsonrpc_error(initialized_resp["messages"])
-    session_id = _as_optional_str(
-        initialized_resp["headers"].get("mcp-session-id")
-    ) or session_id
+    session_id = (
+        _as_optional_str(initialized_resp["headers"].get("mcp-session-id"))
+        or session_id
+    )
     if not session_id:
         raise ValueError(
             "initialize succeeded but server did not return mcp-session-id"
@@ -73,7 +93,7 @@ def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[st
         server_capabilities = init_result.get("capabilities")
         if isinstance(server_capabilities, dict):
             session_doc["server_capabilities"] = server_capabilities
-    _write_session_doc(sess_info_file, session_doc)
+    _write_session_info(sess_info_file, session_doc)
     return {
         "session_id": session_doc["session_id"],
         "session_file": str(Path(sess_info_file)),
@@ -139,7 +159,9 @@ def list_resources(*, sess_info_file: str, cursor: str | None = None) -> dict[st
 def list_resource_templates(
     *, sess_info_file: str, cursor: str | None = None
 ) -> dict[str, Any]:
-    LOGGER.info("mcp.resource.template.list requested sess_info_file=%s", sess_info_file)
+    LOGGER.info(
+        "mcp.resource.template.list requested sess_info_file=%s", sess_info_file
+    )
     params: dict[str, Any] = {}
     if cursor is not None and cursor.strip():
         params["cursor"] = cursor.strip()
@@ -182,7 +204,9 @@ def read_resource_decoded_bytes(
     if not isinstance(result, dict):
         raise ValueError("invalid resources/read response: missing result object")
 
-    data, content_meta = _decode_single_resource_content(result, requested_uri=resolved_uri)
+    data, content_meta = _decode_single_resource_content(
+        result, requested_uri=resolved_uri
+    )
     return data, {
         "uri": content_meta["uri"],
         "mime_type": content_meta["mime_type"],
@@ -192,9 +216,7 @@ def read_resource_decoded_bytes(
     }
 
 
-def save_resource(
-    *, uri: str, sess_info_file: str, out_file: str
-) -> dict[str, Any]:
+def save_resource(*, uri: str, sess_info_file: str, out_file: str) -> dict[str, Any]:
     target = out_file.strip()
     if not target or target == "-":
         raise ValueError("FILE must be a path when using decoded output")
@@ -203,7 +225,9 @@ def save_resource(
     try:
         write_bytes_atomic(target, data)
     except OSError as exc:
-        raise ValueError(f"unable to write decoded resource file {target}: {exc}") from None
+        raise ValueError(
+            f"unable to write decoded resource file {target}: {exc}"
+        ) from None
 
     return {
         "saved": str(Path(target)),
@@ -246,13 +270,13 @@ def _invoke_session_method(
 
     if active_session_id != existing_session_id:
         session_doc["session_id"] = active_session_id
-        _write_session_doc(sess_info_file, session_doc)
+        _write_session_info(sess_info_file, session_doc)
 
     return {"messages": resp["messages"], "session_id": active_session_id}
 
 
 def _load_active_session(sess_info_file: str) -> tuple[dict[str, Any], str, str, str]:
-    session_doc = _read_session_doc(sess_info_file)
+    session_doc = _read_session_info(sess_info_file)
     endpoint = _normalize_url(
         _require_str(session_doc.get("endpoint"), "endpoint"),
         field="endpoint",
@@ -303,12 +327,16 @@ def _decode_single_resource_content(
 
     item = contents[0]
     if not isinstance(item, dict):
-        raise ValueError("invalid resources/read response: content item is not an object")
+        raise ValueError(
+            "invalid resources/read response: content item is not an object"
+        )
 
     has_text = isinstance(item.get("text"), str)
     has_blob = isinstance(item.get("blob"), str)
     if has_text and has_blob:
-        raise ValueError("invalid resources/read response: content item has both text and blob")
+        raise ValueError(
+            "invalid resources/read response: content item has both text and blob"
+        )
 
     if has_text:
         data = item["text"].encode("utf-8")
@@ -316,11 +344,15 @@ def _decode_single_resource_content(
     elif has_blob:
         try:
             data = base64.b64decode(item["blob"], validate=True)
-        except (binascii.Error, ValueError):
-            raise ValueError("invalid resources/read response: content blob is not valid base64") from None
+        except binascii.Error, ValueError:
+            raise ValueError(
+                "invalid resources/read response: content blob is not valid base64"
+            ) from None
         content_kind = "blob"
     else:
-        raise ValueError("invalid resources/read response: content item has neither text nor blob")
+        raise ValueError(
+            "invalid resources/read response: content item has neither text nor blob"
+        )
 
     return data, {
         "uri": _as_optional_str(item.get("uri")) or requested_uri,
@@ -428,40 +460,6 @@ def _extract_jsonrpc_error_message(messages: list[dict[str, Any]]) -> str | None
     return None
 
 
-def _read_session_doc(path: str) -> dict[str, Any]:
-    p = Path(path)
-    try:
-        raw = p.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        raise ValueError(f"session info file not found: {path}") from None
-    except OSError as exc:
-        raise ValueError(f"unable to read session info file: {exc}") from None
-
-    try:
-        doc = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid session info JSON: {exc.msg}") from None
-
-    if not isinstance(doc, dict):
-        raise ValueError("invalid session info file: expected JSON object")
-    return doc
-
-
-def _write_session_doc(path: str, session_doc: dict[str, Any]) -> None:
-    serialized = json.dumps(
-        session_doc,
-        indent=2,
-        ensure_ascii=False,
-        sort_keys=True,
-    ) + "\n"
-    lock_path = f"{path}.lock"
-    try:
-        with locked_file(lock_path):
-            write_text_atomic(path, serialized)
-    except BlockingIOError:
-        raise ValueError(f"session info file is busy: {path}") from None
-
-
 def _post_jsonrpc(
     endpoint: str,
     token: str,
@@ -479,7 +477,9 @@ def _post_jsonrpc(
     if session_id:
         headers["Mcp-Session-Id"] = session_id
 
-    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
     method = _as_optional_str(payload.get("method")) or "<unknown>"
     LOGGER.info("mcp.http POST %s method=%s", endpoint, method)
 
@@ -609,143 +609,7 @@ def _resolve_access_token_from_key_ref(key_ref: str) -> str:
     raise ValueError("KEY_REF does not contain an access token")
 
 
-def _read_key_ref_value(key_ref: str) -> Any:
-    if key_ref.startswith("env://"):
-        var_name = key_ref[len("env://") :].strip()
-        value = os.environ.get(var_name)
-        if value is None:
-            raise ValueError(f"environment variable not set: {var_name}")
-        return _maybe_parse_json_scalar(value)
-
-    if key_ref.startswith(".env://"):
-        rest = key_ref[len(".env://") :]
-        path, var_name = rest.rsplit(":", 1)
-        values = _read_dotenv_file(path)
-        if var_name not in values:
-            raise ValueError(f"variable not found in .env file: {var_name}")
-        return _maybe_parse_json_scalar(values[var_name])
-
-    if key_ref.startswith("json://"):
-        path = key_ref[len("json://") :].strip()
-        p = Path(path)
-        if not p.exists():
-            raise ValueError(f"json key file not found: {path}")
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid JSON in {path}: {exc.msg}") from None
-
-    raise ValueError("invalid KEY_REF")
-
-
-def _extract_access_token(value: Any) -> str | None:
-    if isinstance(value, str):
-        token = value.strip()
-        return token or None
-    if isinstance(value, dict):
-        for key in ("access_token", "accessToken", "token"):
-            token = value.get(key)
-            if isinstance(token, str) and token.strip():
-                return token.strip()
-    return None
-
-
-def _read_dotenv_file(path: str) -> dict[str, str]:
-    file_path = Path(path)
-    if not file_path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for raw_line in file_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key, raw_value = line.split("=", 1)
-        key = key.strip()
-        if not key:
-            continue
-        values[key] = _dotenv_unquote(raw_value.strip())
-    return values
-
-
-def _dotenv_unquote(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] == "'":
-        return value[1:-1].replace("'\"'\"'", "'")
-    if len(value) >= 2 and value[0] == value[-1] == '"':
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return value[1:-1]
-        if isinstance(parsed, str):
-            return parsed
-        return value[1:-1]
-    return value
-
-
-def _maybe_parse_json_scalar(text: str) -> Any:
-    stripped = text.strip()
-    if not stripped:
-        return ""
-    if stripped[0] in "{[\"" or stripped in {"true", "false", "null"}:
-        try:
-            return json.loads(stripped)
-        except json.JSONDecodeError:
-            return text
-    return text
-
-
 def _require_str(value: Any, field: str) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     raise ValueError(f"invalid session info file: missing {field}")
-
-
-def _as_optional_str(value: Any) -> str | None:
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped or None
-    return None
-
-
-def _normalize_url(value: str, *, field: str) -> str:
-    text = value.strip()
-    parsed = urlparse.urlsplit(text)
-    if not parsed.scheme or not parsed.netloc:
-        raise ValueError(f"{field} must be an absolute URL")
-    return text
-
-
-def _normalize_key_ref(raw: str) -> str:
-    value = raw.strip()
-    if not value:
-        raise ValueError("KEY_REF is required")
-
-    if value.startswith("env://"):
-        name = value[len("env://") :].strip()
-        if not name:
-            raise ValueError("invalid KEY_REF: missing env var name")
-        return f"env://{name}"
-
-    if value.startswith(".env://"):
-        rest = value[len(".env://") :]
-        if ":" not in rest:
-            raise ValueError("invalid KEY_REF: expected .env://path:VAR")
-        path, name = rest.rsplit(":", 1)
-        if not path.strip() or not name.strip():
-            raise ValueError("invalid KEY_REF: expected .env://path:VAR")
-        return f".env://{path.strip()}:{name.strip()}"
-
-    if value.startswith("json://"):
-        path = value[len("json://") :].strip()
-        if not path:
-            raise ValueError("invalid KEY_REF: missing json path")
-        return f"json://{path}"
-
-    if "://" not in value:
-        # Convenience shorthand: bare path means json://path.
-        return f"json://{value}"
-
-    raise ValueError("invalid KEY_REF scheme (expected env://, .env://, or json://)")

@@ -18,8 +18,8 @@ dev = [
 ]
 
 [project.scripts]
-mcat = "mcat_cli:main"
-mcat-cli = "mcat_cli:main"
+mcat = "mcat_cli.main:main"
+mcat-cli = "mcat_cli.main:main"
 
 [tool.ruff]
 target-version = "py314"

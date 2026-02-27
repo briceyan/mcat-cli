@@ -4,10 +4,8 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import secrets
 import sys
-import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -19,21 +17,36 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from .util.files import locked_file, write_text_atomic
+from .util.auth_state import (
+    default_auth_state_file as _default_auth_state_file,
+)
+from .util.auth_state import (
+    read_auth_state_file as _read_auth_state_file,
+)
+from .util.auth_state import (
+    write_auth_state_file as _write_auth_state_file,
+)
+from .util.common import (
+    as_optional_str as _as_optional_str,
+)
+from .util.common import (
+    normalize_url as _normalize_url,
+)
+from .util.key_ref import (
+    KeyRefNotFoundError,
+)
+from .util.key_ref import (
+    read_key_ref_value as _read_key_ref,
+)
+from .util.key_ref import (
+    write_key_ref_value as _write_key_ref,
+)
 
 LOGGER = logging.getLogger("mcat.auth")
 
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 DEFAULT_PUBLIC_CLIENT_ID = "mcat-cli"
 AUTH_CODE_TIMEOUT_S = 300.0
-
-
-@dataclass(frozen=True, slots=True)
-class KeyRef:
-    kind: str
-    path: str | None
-    name: str | None
-    raw: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,17 +91,13 @@ class HttpJsonError(RuntimeError):
         super().__init__(f"HTTP {status} for {url}")
 
 
-class KeyRefNotFoundError(ValueError):
-    pass
-
-
 def start_auth(
     *,
     endpoint: str,
     key_ref: str,
-    out_key_ref: str | None,
     state_file: str | None,
     wait: bool,
+    overwrite: bool,
 ) -> dict[str, Any]:
     LOGGER.info("auth.start endpoint=%s wait=%s", endpoint, wait)
     endpoint = _normalize_url(endpoint, field="ENDPOINT")
@@ -99,9 +108,9 @@ def start_auth(
         return _start_auth_device(
             endpoint=endpoint,
             key_ref=key_ref,
-            out_key_ref=out_key_ref,
             state_file=state_file,
             wait=wait,
+            overwrite=overwrite,
             client_cfg=client_cfg,
             oauth_meta=oauth_meta,
         )
@@ -112,9 +121,9 @@ def start_auth(
         return _start_auth_authorization_code(
             endpoint=endpoint,
             key_ref=key_ref,
-            out_key_ref=out_key_ref,
             state_file=state_file,
             wait=wait,
+            overwrite=overwrite,
             client_cfg=client_cfg,
             oauth_meta=oauth_meta,
         )
@@ -125,8 +134,8 @@ def start_auth(
 def continue_auth(
     *,
     state_file: str,
-    out_key_ref: str | None,
-    out_key_ref_self: bool = False,
+    key_ref: str,
+    overwrite: bool,
 ) -> dict[str, Any]:
     LOGGER.info("auth.continue state_file=%s", state_file)
     state_path = Path(state_file)
@@ -143,16 +152,16 @@ def continue_auth(
             state_file=state_file,
             state_doc=state_doc,
             state=state,
-            out_key_ref=out_key_ref,
-            out_key_ref_self=out_key_ref_self,
+            key_ref=key_ref,
+            overwrite=overwrite,
         )
     if flow == "authorization_code":
         return _continue_auth_authorization_code(
             state_file=state_file,
             state_doc=state_doc,
             state=state,
-            out_key_ref=out_key_ref,
-            out_key_ref_self=out_key_ref_self,
+            key_ref=key_ref,
+            overwrite=overwrite,
         )
     raise ValueError("unsupported auth state flow")
 
@@ -161,9 +170,9 @@ def _start_auth_device(
     *,
     endpoint: str,
     key_ref: str,
-    out_key_ref: str | None,
     state_file: str | None,
     wait: bool,
+    overwrite: bool,
     client_cfg: ClientConfig,
     oauth_meta: dict[str, str],
 ) -> dict[str, Any]:
@@ -181,7 +190,6 @@ def _start_auth_device(
         oauth_meta=oauth_meta,
         client_cfg=client_cfg,
         device_flow=device_flow,
-        out_key_ref=out_key_ref,
     )
 
     if resolved_state_file:
@@ -195,7 +203,11 @@ def _start_auth_device(
             if resolved_state_file
             else None,
         )
-        return _finalize_token_result(token_payload, out_key_ref=out_key_ref)
+        return _finalize_token_result(
+            token_payload,
+            key_ref=key_ref,
+            overwrite=overwrite,
+        )
 
     return _pending_result(
         state_file=_require_state_file_for_pending(resolved_state_file),
@@ -208,15 +220,9 @@ def _continue_auth_device(
     state_file: str,
     state_doc: dict[str, Any],
     state: dict[str, Any],
-    out_key_ref: str | None,
-    out_key_ref_self: bool,
+    key_ref: str,
+    overwrite: bool,
 ) -> dict[str, Any]:
-    effective_out_key_ref = _resolve_effective_out_key_ref(
-        state=state,
-        out_key_ref=out_key_ref,
-        out_key_ref_self=out_key_ref_self,
-    )
-
     poll = _poll_token_once(state)
     if poll["status"] == "pending":
         _write_auth_state_file(state_file, state_doc)
@@ -229,16 +235,20 @@ def _continue_auth_device(
     state["status"] = "complete"
     state["completed_at"] = _now_epoch()
     _write_auth_state_file(state_file, state_doc)
-    return _finalize_token_result(token_payload, out_key_ref=effective_out_key_ref)
+    return _finalize_token_result(
+        token_payload,
+        key_ref=key_ref,
+        overwrite=overwrite,
+    )
 
 
 def _start_auth_authorization_code(
     *,
     endpoint: str,
     key_ref: str,
-    out_key_ref: str | None,
     state_file: str | None,
     wait: bool,
+    overwrite: bool,
     client_cfg: ClientConfig,
     oauth_meta: dict[str, str],
 ) -> dict[str, Any]:
@@ -278,7 +288,6 @@ def _start_auth_authorization_code(
         state_doc = _build_auth_code_state_doc(
             endpoint=endpoint,
             input_key_ref=key_ref,
-            out_key_ref=out_key_ref,
             oauth_meta=oauth_meta,
             client_id=registration["client_id"],
             client_secret=registration.get("client_secret"),
@@ -309,10 +318,14 @@ def _start_auth_authorization_code(
             state_doc["state"]["status"] = "complete"
             state_doc["state"]["completed_at"] = _now_epoch()
             _write_auth_state_file(state_file, state_doc)
-        return _finalize_token_result(token_payload, out_key_ref=out_key_ref)
+        return _finalize_token_result(
+            token_payload,
+            key_ref=key_ref,
+            overwrite=overwrite,
+        )
     except TimeoutError:
         raise ValueError(
-            "timed out waiting for OAuth callback (re-run `mcat auth` or use `auth continue` support in a future build)"
+            "timed out waiting for OAuth callback (re-run `mcat auth start` or use `mcat auth continue`)"
         ) from None
     finally:
         _stop_oauth_callback_listener(callback)
@@ -323,8 +336,8 @@ def _continue_auth_authorization_code(
     state_file: str,
     state_doc: dict[str, Any],
     state: dict[str, Any],
-    out_key_ref: str | None,
-    out_key_ref_self: bool,
+    key_ref: str,
+    overwrite: bool,
 ) -> dict[str, Any]:
     # Resume by re-opening the same loopback callback listener and waiting for completion.
     redirect_uri = _require_state_str(state, "redirect_uri")
@@ -337,11 +350,6 @@ def _continue_auth_authorization_code(
             f"unable to bind saved redirect URI {redirect_uri}; ensure the port is free"
         )
     try:
-        effective_out_key_ref = _resolve_effective_out_key_ref(
-            state=state,
-            out_key_ref=out_key_ref,
-            out_key_ref_self=out_key_ref_self,
-        )
         _print_wait_instructions({"verification_uri_complete": authorization_url})
         callback_result = _wait_for_oauth_callback(
             callback, timeout_s=AUTH_CODE_TIMEOUT_S
@@ -358,30 +366,16 @@ def _continue_auth_authorization_code(
         state["status"] = "complete"
         state["completed_at"] = _now_epoch()
         _write_auth_state_file(state_file, state_doc)
-        return _finalize_token_result(token_payload, out_key_ref=effective_out_key_ref)
+        return _finalize_token_result(
+            token_payload,
+            key_ref=key_ref,
+            overwrite=overwrite,
+        )
     except TimeoutError:
         _write_auth_state_file(state_file, state_doc)
         raise ValueError("timed out waiting for OAuth callback") from None
     finally:
         _stop_oauth_callback_listener(callback)
-
-
-def _resolve_effective_out_key_ref(
-    *,
-    state: dict[str, Any],
-    out_key_ref: str | None,
-    out_key_ref_self: bool,
-) -> str | None:
-    if out_key_ref_self and out_key_ref is not None:
-        raise ValueError("use `-o` without a value or `-o KEY_REF`, not both")
-
-    if out_key_ref_self:
-        effective_out_key_ref = _as_optional_str(state.get("input_key_ref"))
-        if not effective_out_key_ref:
-            raise ValueError("auth state file is missing input_key_ref for `-o`")
-        return effective_out_key_ref
-
-    return out_key_ref or _as_optional_str(state.get("out_key_ref"))
 
 
 def _pending_result(*, state_file: str, state: dict[str, Any]) -> dict[str, Any]:
@@ -403,14 +397,11 @@ def _pending_result(*, state_file: str, state: dict[str, Any]) -> dict[str, Any]
 
 
 def _finalize_token_result(
-    token_payload: dict[str, Any], *, out_key_ref: str | None
+    token_payload: dict[str, Any], *, key_ref: str, overwrite: bool
 ) -> dict[str, Any]:
     normalized = _normalize_token_payload(token_payload)
-    if out_key_ref:
-        _write_key_ref(out_key_ref, normalized)
-        return {"status": "complete", "stored": out_key_ref}
-    result = {"status": "complete", **normalized}
-    return result
+    _write_key_ref(key_ref, normalized, overwrite=overwrite)
+    return {"status": "complete", "stored": key_ref}
 
 
 def _normalize_token_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -428,7 +419,6 @@ def _build_auth_state_doc(
     oauth_meta: dict[str, str],
     client_cfg: ClientConfig,
     device_flow: dict[str, Any],
-    out_key_ref: str | None,
 ) -> dict[str, Any]:
     expires_in = _as_int(device_flow.get("expires_in")) or 900
     interval = _as_int(device_flow.get("interval")) or 5
@@ -454,8 +444,6 @@ def _build_auth_state_doc(
         state["audience"] = client_cfg.audience
     if client_cfg.resource:
         state["resource"] = client_cfg.resource
-    if out_key_ref:
-        state["out_key_ref"] = out_key_ref
 
     return {
         "version": 1,
@@ -678,7 +666,6 @@ def _build_auth_code_state_doc(
     *,
     endpoint: str,
     input_key_ref: str,
-    out_key_ref: str | None,
     oauth_meta: dict[str, str],
     client_id: str,
     client_secret: str | None,
@@ -703,8 +690,6 @@ def _build_auth_code_state_doc(
     }
     if client_secret:
         state["client_secret"] = client_secret
-    if out_key_ref:
-        state["out_key_ref"] = out_key_ref
     if _as_optional_str(oauth_meta.get("resource")):
         state["resource"] = oauth_meta["resource"]
     if _as_optional_str(oauth_meta.get("challenged_scope")):
@@ -1365,203 +1350,6 @@ def _default_client_config() -> ClientConfig:
     )
 
 
-def _parse_key_ref(raw: str) -> KeyRef:
-    raw = raw.strip()
-    if not raw:
-        raise ValueError("invalid KEY_REF: empty value")
-
-    if raw.startswith("env://"):
-        name = raw[len("env://") :].strip()
-        if not name:
-            raise ValueError("invalid KEY_REF: missing env var name")
-        return KeyRef(kind="env", path=None, name=name, raw=raw)
-
-    if raw.startswith(".env://"):
-        rest = raw[len(".env://") :]
-        if ":" not in rest:
-            raise ValueError("invalid KEY_REF: expected .env://path:VAR")
-        path, name = rest.rsplit(":", 1)
-        if not path or not name:
-            raise ValueError("invalid KEY_REF: expected .env://path:VAR")
-        return KeyRef(kind="dotenv", path=path, name=name, raw=raw)
-
-    if raw.startswith("json://"):
-        path = raw[len("json://") :].strip()
-        if not path:
-            raise ValueError("invalid KEY_REF: missing json path")
-        return KeyRef(kind="json", path=path, name=None, raw=raw)
-
-    if "://" not in raw:
-        # Convenience shorthand: bare path means json://path.
-        return KeyRef(kind="json", path=raw, name=None, raw=raw)
-
-    raise ValueError("invalid KEY_REF scheme (expected env://, .env://, or json://)")
-
-
-def _read_key_ref(raw: str) -> Any:
-    ref = _parse_key_ref(raw)
-    if ref.kind == "env":
-        assert ref.name is not None
-        value = os.environ.get(ref.name)
-        if value is None:
-            raise KeyRefNotFoundError(f"environment variable not set: {ref.name}")
-        return _maybe_parse_json_scalar(value)
-
-    if ref.kind == "dotenv":
-        assert ref.path is not None and ref.name is not None
-        vars_map = _read_dotenv_file(ref.path)
-        if ref.name not in vars_map:
-            raise KeyRefNotFoundError(f"variable not found in .env file: {ref.name}")
-        return _maybe_parse_json_scalar(vars_map[ref.name])
-
-    if ref.kind == "json":
-        assert ref.path is not None
-        path = Path(ref.path)
-        if not path.exists():
-            raise KeyRefNotFoundError(f"json key file not found: {ref.path}")
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid JSON in {ref.path}: {exc.msg}") from None
-
-    raise AssertionError("unreachable")
-
-
-def _write_key_ref(raw: str, payload: Any) -> None:
-    ref = _parse_key_ref(raw)
-    if ref.kind == "env":
-        raise ValueError(
-            "env:// KEY_REF is read-only; use .env:// or json:// for output"
-        )
-
-    if ref.kind == "json":
-        assert ref.path is not None
-        content = (
-            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
-        )
-        write_text_atomic(ref.path, content)
-        return
-
-    if ref.kind == "dotenv":
-        assert ref.path is not None and ref.name is not None
-        value = (
-            payload
-            if isinstance(payload, str)
-            else json.dumps(payload, separators=(",", ":"))
-        )
-        _write_dotenv_var(ref.path, ref.name, value)
-        return
-
-    raise AssertionError("unreachable")
-
-
-def _read_dotenv_file(path: str) -> dict[str, str]:
-    file_path = Path(path)
-    if not file_path.exists():
-        return {}
-
-    values: dict[str, str] = {}
-    for raw_line in file_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if not key:
-            continue
-        values[key] = _dotenv_unquote(value.strip())
-    return values
-
-
-def _write_dotenv_var(path: str, name: str, value: str) -> None:
-    file_path = Path(path)
-    lines = (
-        file_path.read_text(encoding="utf-8").splitlines(keepends=True)
-        if file_path.exists()
-        else []
-    )
-    encoded_value = _dotenv_quote(value)
-    new_line = f"{name}={encoded_value}\n"
-    replaced = False
-    out_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        candidate = stripped
-        if candidate.startswith("export "):
-            candidate = candidate[len("export ") :].lstrip()
-        if "=" in candidate:
-            key, _ = candidate.split("=", 1)
-            if key.strip() == name:
-                out_lines.append(new_line)
-                replaced = True
-                continue
-        out_lines.append(line if line.endswith("\n") else f"{line}\n")
-    if not replaced:
-        out_lines.append(new_line)
-    write_text_atomic(file_path, "".join(out_lines))
-
-
-def _dotenv_quote(value: str) -> str:
-    return "'" + value.replace("'", "'\"'\"'") + "'"
-
-
-def _dotenv_unquote(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] == "'":
-        inner = value[1:-1]
-        return inner.replace("'\"'\"'", "'")
-    if len(value) >= 2 and value[0] == value[-1] == '"':
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return value[1:-1]
-    return value
-
-
-def _maybe_parse_json_scalar(text: str) -> Any:
-    stripped = text.strip()
-    if not stripped:
-        return ""
-    if stripped[0] in '{["' or stripped in {"true", "false", "null"}:
-        try:
-            return json.loads(stripped)
-        except json.JSONDecodeError:
-            return text
-    return text
-
-
-def _read_auth_state_file(path: str) -> dict[str, Any]:
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise ValueError(f"auth state file not found: {path}") from None
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid auth state file JSON: {exc.msg}") from None
-    if not isinstance(data, dict):
-        raise ValueError("invalid auth state file: expected object")
-    return data
-
-
-def _write_auth_state_file(path: str, state_doc: dict[str, Any]) -> None:
-    lock_path = f"{path}.lock"
-    content = json.dumps(state_doc, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
-    try:
-        with locked_file(lock_path):
-            write_text_atomic(path, content)
-    except BlockingIOError:
-        raise ValueError(f"auth state file is busy: {path}") from None
-
-
-def _default_auth_state_file() -> str:
-    fd, path = tempfile.mkstemp(prefix="mcat-auth-", suffix=".json")
-    os.close(fd)
-    Path(path).unlink(missing_ok=True)
-    return path
-
-
 def _require_state_file_for_pending(path: str | None) -> str:
     if not path:
         raise ValueError("internal error: missing auth state file for pending result")
@@ -1583,14 +1371,6 @@ def _print_wait_instructions(device_flow: dict[str, Any]) -> None:
         print(f"Code: {code}", file=sys.stderr)
 
 
-def _normalize_url(value: str, *, field: str) -> str:
-    text = value.strip()
-    parsed = urlparse.urlsplit(text)
-    if not parsed.scheme or not parsed.netloc:
-        raise ValueError(f"{field} must be an absolute URL")
-    return text
-
-
 def _dedupe(values: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -1599,13 +1379,6 @@ def _dedupe(values: list[str]) -> list[str]:
             out.append(value)
             seen.add(value)
     return out
-
-
-def _as_optional_str(value: Any) -> str | None:
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped or None
-    return None
 
 
 def _as_int(value: Any) -> int | None:
