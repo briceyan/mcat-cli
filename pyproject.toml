@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "json5>=0.12,<1.0",
     "typer>=0.12,<1.0",
 ]
 

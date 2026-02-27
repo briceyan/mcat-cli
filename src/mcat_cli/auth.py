@@ -610,13 +610,11 @@ def _resolve_client_for_authorization_code(
     redirect_uri: str,
 ) -> dict[str, str]:
     registration_endpoint = _as_optional_str(oauth_meta.get("registration_endpoint"))
-    should_try_dynamic = (
+    if (
         registration_endpoint is not None
         and client_cfg.client_id == DEFAULT_PUBLIC_CLIENT_ID
         and client_cfg.client_secret is None
-    )
-
-    if should_try_dynamic:
+    ):
         reg = _register_dynamic_client(
             registration_endpoint=registration_endpoint,
             redirect_uri=redirect_uri,
