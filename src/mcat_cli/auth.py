@@ -371,14 +371,16 @@ def _start_auth_authorization_code(
 
         code_verifier = _generate_pkce_verifier()
         code_challenge = _pkce_challenge_s256(code_verifier)
+        requested_scope = client_cfg.scope or _as_optional_str(
+            oauth_meta.get("challenged_scope")
+        )
         auth_url = _build_authorization_request_url(
             authorization_endpoint=authz_endpoint,
             client_id=registration["client_id"],
             redirect_uri=callback.redirect_uri,
             state=state_nonce,
             code_challenge=code_challenge,
-            scope=_as_optional_str(oauth_meta.get("challenged_scope"))
-            or client_cfg.scope,
+            scope=requested_scope,
             resource=_as_optional_str(oauth_meta.get("resource"))
             or client_cfg.resource,
         )
@@ -393,6 +395,7 @@ def _start_auth_authorization_code(
             code_verifier=code_verifier,
             oauth_state=state_nonce,
             authorization_url=auth_url,
+            scope=requested_scope,
         )
         if state_file:
             _write_auth_state_file(state_file, state_doc)
@@ -786,6 +789,7 @@ def _build_auth_code_state_doc(
     code_verifier: str,
     oauth_state: str,
     authorization_url: str,
+    scope: str | None,
 ) -> dict[str, Any]:
     state: dict[str, Any] = {
         "issuer": _require_state_like(oauth_meta, "issuer"),
@@ -805,8 +809,8 @@ def _build_auth_code_state_doc(
         state["client_secret"] = client_secret
     if _as_optional_str(oauth_meta.get("resource")):
         state["resource"] = oauth_meta["resource"]
-    if _as_optional_str(oauth_meta.get("challenged_scope")):
-        state["scope"] = oauth_meta["challenged_scope"]
+    if scope:
+        state["scope"] = scope
     return {
         "version": 1,
         "endpoint": endpoint,
