@@ -74,6 +74,7 @@ class ClientConfig:
     scope: str | None
     audience: str | None
     resource: str | None
+    use_dynamic_registration: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,18 +366,21 @@ def _start_auth_authorization_code(
             oauth_meta=oauth_meta,
             client_cfg=client_cfg,
             redirect_uri=callback.redirect_uri,
+            key_ref=key_ref,
         )
 
         code_verifier = _generate_pkce_verifier()
         code_challenge = _pkce_challenge_s256(code_verifier)
+        requested_scope = client_cfg.scope or _as_optional_str(
+            oauth_meta.get("challenged_scope")
+        )
         auth_url = _build_authorization_request_url(
             authorization_endpoint=authz_endpoint,
             client_id=registration["client_id"],
             redirect_uri=callback.redirect_uri,
             state=state_nonce,
             code_challenge=code_challenge,
-            scope=_as_optional_str(oauth_meta.get("challenged_scope"))
-            or client_cfg.scope,
+            scope=requested_scope,
             resource=_as_optional_str(oauth_meta.get("resource"))
             or client_cfg.resource,
         )
@@ -391,6 +395,7 @@ def _start_auth_authorization_code(
             code_verifier=code_verifier,
             oauth_state=state_nonce,
             authorization_url=auth_url,
+            scope=requested_scope,
         )
         if state_file:
             _write_auth_state_file(state_file, state_doc)
@@ -692,18 +697,23 @@ def _resolve_client_for_authorization_code(
     oauth_meta: dict[str, str],
     client_cfg: ClientConfig,
     redirect_uri: str,
+    key_ref: str,
 ) -> dict[str, str]:
     registration_endpoint = _as_optional_str(oauth_meta.get("registration_endpoint"))
     if (
         registration_endpoint is not None
-        and client_cfg.client_id == DEFAULT_PUBLIC_CLIENT_ID
-        and client_cfg.client_secret is None
+        and client_cfg.use_dynamic_registration
     ):
-        reg = _register_dynamic_client(
-            registration_endpoint=registration_endpoint,
-            redirect_uri=redirect_uri,
-            client_name="mcat-cli",
-        )
+        try:
+            reg = _register_dynamic_client(
+                registration_endpoint=registration_endpoint,
+                redirect_uri=redirect_uri,
+                client_name="mcat-cli",
+            )
+        except HttpJsonError as exc:
+            raise ValueError(
+                _dynamic_client_registration_error_message(exc=exc, key_ref=key_ref)
+            ) from None
         client_id = _as_optional_str(reg.get("client_id"))
         if not client_id:
             raise ValueError("dynamic client registration returned no client_id")
@@ -712,6 +722,8 @@ def _resolve_client_for_authorization_code(
         if client_secret:
             result["client_secret"] = client_secret
         return result
+    if registration_endpoint is not None:
+        LOGGER.info("auth.client using configured static client; skipping dynamic registration")
 
     return {
         "client_id": client_cfg.client_id,
@@ -736,26 +748,34 @@ def _register_dynamic_client(
         "token_endpoint_auth_method": "none",
         "redirect_uris": [redirect_uri],
     }
-    try:
-        resp = _http_json(
-            "POST",
-            registration_endpoint,
-            json_body=payload,
-            extra_headers={"Accept": "application/json"},
-        )
-    except HttpJsonError as exc:
-        payload_obj = exc.payload if isinstance(exc.payload, dict) else {}
-        msg = _as_optional_str(
-            payload_obj.get("error_description")
-        ) or _as_optional_str(payload_obj.get("error"))
-        if msg:
-            raise ValueError(f"dynamic client registration failed: {msg}") from None
-        raise ValueError(
-            f"dynamic client registration failed (HTTP {exc.status})"
-        ) from None
+    resp = _http_json(
+        "POST",
+        registration_endpoint,
+        json_body=payload,
+        extra_headers={"Accept": "application/json"},
+    )
     if not isinstance(resp, dict):
         raise ValueError("invalid dynamic client registration response")
     return resp
+
+
+def _dynamic_client_registration_error_message(
+    *, exc: HttpJsonError, key_ref: str
+) -> str:
+    payload_obj = exc.payload if isinstance(exc.payload, dict) else {}
+    provider_msg = _as_optional_str(
+        payload_obj.get("error_description")
+    ) or _as_optional_str(payload_obj.get("error"))
+    if exc.status in {401, 403}:
+        detail = f": {provider_msg}" if provider_msg else ""
+        return (
+            f"dynamic client registration rejected by server (HTTP {exc.status}){detail}; "
+            f"configure --key-ref {key_ref} with OAuth client fields "
+            '{"client_id":"...","client_secret":"..."} and retry auth start'
+        )
+    if provider_msg:
+        return f"dynamic client registration failed: {provider_msg}"
+    return f"dynamic client registration failed (HTTP {exc.status})"
 
 
 def _build_auth_code_state_doc(
@@ -769,6 +789,7 @@ def _build_auth_code_state_doc(
     code_verifier: str,
     oauth_state: str,
     authorization_url: str,
+    scope: str | None,
 ) -> dict[str, Any]:
     state: dict[str, Any] = {
         "issuer": _require_state_like(oauth_meta, "issuer"),
@@ -788,8 +809,8 @@ def _build_auth_code_state_doc(
         state["client_secret"] = client_secret
     if _as_optional_str(oauth_meta.get("resource")):
         state["resource"] = oauth_meta["resource"]
-    if _as_optional_str(oauth_meta.get("challenged_scope")):
-        state["scope"] = oauth_meta["challenged_scope"]
+    if scope:
+        state["scope"] = scope
     return {
         "version": 1,
         "endpoint": endpoint,
@@ -1532,6 +1553,7 @@ def _load_client_config_from_key_ref(key_ref_raw: str) -> ClientConfig:
         scope=scope,
         audience=_as_optional_str(payload.get("audience")),
         resource=_as_optional_str(payload.get("resource")),
+        use_dynamic_registration=False,
     )
 
 
@@ -1542,6 +1564,7 @@ def _default_client_config() -> ClientConfig:
         scope=None,
         audience=None,
         resource=None,
+        use_dynamic_registration=True,
     )
 
 
