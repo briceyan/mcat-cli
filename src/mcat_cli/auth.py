@@ -50,6 +50,21 @@ LOGGER = logging.getLogger("mcat.auth")
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 DEFAULT_PUBLIC_CLIENT_ID = "mcat-cli"
 AUTH_CODE_TIMEOUT_S = 300.0
+HTTP_BODY_LOG_PREVIEW_LIMIT = 240
+SENSITIVE_LOG_FIELDS = {
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "client_secret",
+    "client_assertion",
+    "assertion",
+    "code",
+    "code_verifier",
+    "device_code",
+    "user_code",
+    "password",
+    "token",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1138,6 +1153,7 @@ def _probe_mcp_auth(endpoint: str) -> dict[str, str]:
         "Content-Type": "application/json",
     }
     LOGGER.info("auth.http POST %s jsonrpc=initialize", endpoint)
+    LOGGER.debug("auth.discovery mcp-probe req_body=%s", _preview_structured_for_log(probe_json))
     req = urlrequest.Request(url=endpoint, method="POST", data=body, headers=headers)
     resp_headers = None
     status: int | None = None
@@ -1159,6 +1175,13 @@ def _probe_mcp_auth(endpoint: str) -> dict[str, str]:
         return {}
 
     LOGGER.info("auth.http POST %s -> %s", endpoint, status)
+    content_type = _as_optional_str(
+        getattr(resp_headers, "get", lambda _name: None)("Content-Type")
+    )
+    response_preview = _preview_http_text_for_log(text, content_type=content_type)
+    if response_preview is not None:
+        LOGGER.debug("auth.discovery mcp-probe resp_body=%s", response_preview)
+
     www_auth_values = _get_header_values(resp_headers, "WWW-Authenticate")
     challenges = _parse_www_authenticate(www_auth_values)
     bearer = next((c for c in challenges if c.scheme == "bearer"), None)
@@ -1170,9 +1193,6 @@ def _probe_mcp_auth(endpoint: str) -> dict[str, str]:
             "auth.discovery mcp-probe bearer params=%s",
             ",".join(sorted(bearer.params)),
         )
-    if text:
-        # Keep body logging concise; this is mainly useful for debugging non-standard servers.
-        LOGGER.debug("auth.discovery mcp-probe body=%s", text[:500])
 
     out: dict[str, str] = {}
     resource_metadata = bearer.params.get("resource_metadata")
@@ -1217,6 +1237,15 @@ def _http_json(
         LOGGER.info("auth.http %s %s json", method, url)
     else:
         LOGGER.info("auth.http %s %s", method, url)
+    if form is not None:
+        LOGGER.debug("auth.http %s %s req_body=%s", method, url, _preview_structured_for_log(form))
+    elif json_body is not None:
+        LOGGER.debug(
+            "auth.http %s %s req_body=%s",
+            method,
+            url,
+            _preview_structured_for_log(json_body),
+        )
 
     if extra_headers:
         headers.update(extra_headers)
@@ -1228,6 +1257,10 @@ def _http_json(
             body = resp.read()
             text = body.decode("utf-8", errors="replace")
             LOGGER.info("auth.http %s %s -> %s", method, url, status)
+            content_type = _as_optional_str(resp.headers.get("Content-Type"))
+            response_preview = _preview_http_text_for_log(text, content_type=content_type)
+            if response_preview is not None:
+                LOGGER.debug("auth.http %s %s resp_body=%s", method, url, response_preview)
             if not text:
                 return None
             try:
@@ -1243,6 +1276,12 @@ def _http_json(
         except json.JSONDecodeError:
             payload = None
         LOGGER.info("auth.http %s %s -> %s", method, url, exc.code)
+        content_type = _as_optional_str(
+            getattr(exc.headers, "get", lambda _name: None)("Content-Type")
+        )
+        response_preview = _preview_http_text_for_log(text, content_type=content_type)
+        if response_preview is not None:
+            LOGGER.debug("auth.http %s %s resp_body=%s", method, url, response_preview)
         raise HttpJsonError(
             status=int(exc.code),
             url=url,
@@ -1252,6 +1291,81 @@ def _http_json(
     except urlerror.URLError as exc:
         reason = getattr(exc, "reason", exc)
         raise ValueError(f"network error contacting {url}: {reason}") from None
+
+
+def _preview_structured_for_log(value: Any) -> str:
+    sanitized = _redact_for_log(value)
+    return _truncate_for_log(
+        json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False)
+    )
+
+
+def _preview_http_text_for_log(text: str, *, content_type: str | None) -> str | None:
+    if not text:
+        return None
+
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    lowered_content_type = (content_type or "").lower()
+    should_try_json = (
+        "json" in lowered_content_type or stripped.startswith("{") or stripped.startswith("[")
+    )
+    if should_try_json:
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if parsed is not None:
+            return _preview_structured_for_log(parsed)
+
+    if "application/x-www-form-urlencoded" in lowered_content_type:
+        parsed_form = urlparse.parse_qs(stripped, keep_blank_values=True)
+        normalized_form = {
+            key: values[0] if len(values) == 1 else values
+            for key, values in parsed_form.items()
+        }
+        return _preview_structured_for_log(normalized_form)
+
+    return _truncate_for_log(" ".join(stripped.split()))
+
+
+def _redact_for_log(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and _is_sensitive_log_field(key):
+        return "[REDACTED]"
+
+    if isinstance(value, dict):
+        return {
+            item_key: _redact_for_log(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+
+    if isinstance(value, list):
+        return [_redact_for_log(item) for item in value]
+
+    return value
+
+
+def _is_sensitive_log_field(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    if normalized == "token_type":
+        return False
+    if normalized in SENSITIVE_LOG_FIELDS:
+        return True
+    if normalized.endswith("_secret"):
+        return True
+    if normalized.endswith("_token"):
+        return True
+    return False
+
+
+def _truncate_for_log(text: str, *, limit: int = HTTP_BODY_LOG_PREVIEW_LIMIT) -> str:
+    single_line = " ".join(text.split())
+    if len(single_line) <= limit:
+        return single_line
+    remainder = len(single_line) - limit
+    return f"{single_line[:limit]}...(+{remainder} chars)"
 
 
 def _get_header_values(headers: Any, name: str) -> list[str]:
