@@ -166,18 +166,12 @@ def auth_continue(
     )
 
 
-init_cmd = typer.Typer(context_settings={"allow_interspersed_args": True})
-
-
-@init_cmd.callback(invoke_without_command=True)
 def init_default(
     ctx: typer.Context,
     endpoint: EndpointArg,
     key_ref: KeyRefOpt,
     sess_info_file: SessionInfoOutOpt,
 ) -> None:
-    if ctx.invoked_subcommand is not None:
-        return
     _ = _runtime(ctx)
     _run_json_command(
         lambda: mcp_mod.init_session(
@@ -346,7 +340,7 @@ app = typer.Typer(
     **conf,
 )
 app.add_typer(auth_cmd, name="auth", help="Authorize MCP server access.", **conf)
-app.add_typer(init_cmd, name="init", help="Initialize MCP sessions.", **conf)
+app.command("init", help="Initialize MCP sessions.")(init_default)
 app.add_typer(tool_cmd, name="tool", help="Use MCP tools.", **conf)
 app.add_typer(resource_cmd, name="resource", help="Use MCP resources.", **conf)
 app.add_typer(prompt_cmd, name="prompt", help="Use MCP prompts.", **conf)
