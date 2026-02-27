@@ -46,7 +46,7 @@ EndpointArg = Annotated[
 KeyRefOpt = Annotated[
     str,
     typer.Option(
-        "-k", "--key-ref", metavar="KEY_REF", help="Where to ead key/token from."
+        "-k", "--key-ref", metavar="KEY_REF", help="Where to read key/token from."
     ),
 ]
 KeyRefOverwriteOpt = Annotated[
@@ -114,7 +114,7 @@ class GlobalOpts:
 auth_cmd = typer.Typer()
 
 
-@auth_cmd.command("start", help="Start a new authentication flow.")
+@auth_cmd.command("start", help="Start an OAuth authorization flow.")
 def auth_start(
     ctx: typer.Context,
     endpoint: EndpointArg,
@@ -137,7 +137,7 @@ def auth_start(
     )
 
 
-@auth_cmd.command("continue", help="Continue a previously started authentication flow.")
+@auth_cmd.command("continue", help="Continue a pending OAuth authorization flow.")
 def auth_continue(
     ctx: typer.Context,
     state_file: AuthStateFileOpt,
@@ -298,7 +298,7 @@ app = typer.Typer(
     callback=parse_global_opts,
     **conf,
 )
-app.add_typer(auth_cmd, name="auth", help="Sign in to MCP servers.", **conf)
+app.add_typer(auth_cmd, name="auth", help="Authorize MCP server access.", **conf)
 app.add_typer(init_cmd, name="init", help="Initialize MCP sessions.", **conf)
 app.add_typer(tool_cmd, name="tool", help="Use MCP tools.", **conf)
 app.add_typer(resource_cmd, name="resource", help="Use MCP resources.", **conf)

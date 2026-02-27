@@ -24,14 +24,14 @@ Design priorities:
 ## Command Surface (v1)
 
 ```bash
-mcat [GLOBAL_OPTS] auth ENDPOINT -k KEY_REF [-o [OUT_KEY_REF]] [--state AUTH_STATE_FILE] [--wait]
-mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE [-o [OUT_KEY_REF]]
+mcat [GLOBAL_OPTS] auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE [--wait] [-o]
+mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE -k KEY_REF [-o]
 
 mcat [GLOBAL_OPTS] init ENDPOINT -k KEY_REF -o SESS_INFO_FILE
 
 mcat [GLOBAL_OPTS] resource list -s SESS_INFO_FILE [--cursor CURSOR]
 mcat [GLOBAL_OPTS] resource read URI -s SESS_INFO_FILE [-o FILE]
-mcat [GLOBAL_OPTS] resource template list -s SESS_INFO_FILE [--cursor CURSOR]
+mcat [GLOBAL_OPTS] resource list-template -s SESS_INFO_FILE [--cursor CURSOR]
 
 mcat [GLOBAL_OPTS] tool list -s SESS_INFO_FILE
 mcat [GLOBAL_OPTS] tool call TOOL_NAME -i ARGS -s SESS_INFO_FILE
@@ -39,20 +39,17 @@ mcat [GLOBAL_OPTS] tool call TOOL_NAME -i ARGS -s SESS_INFO_FILE
 
 Notes:
 
-- `auth` starts an authentication flow.
-- `auth continue` resumes a previously started auth flow (required for agent/interleaved usage).
+- `auth` manages OAuth authorization flows.
+- `auth start` begins a new authorization flow.
+- `auth continue` resumes a pending authorization flow.
 - `tool call` includes `TOOL_NAME` explicitly.
 - `resource read` includes `URI` explicitly and supports optional decoded output via `-o`.
 - `SESS_INFO_FILE` is created by `init` and reused by `tool` commands.
 - `SESS_INFO_FILE` is also reused by `resource` commands.
+- `--state AUTH_STATE_FILE` is required for `auth start` and `auth continue`.
+- `-k / --key-ref` is required for `auth start` and `auth continue`.
 - `auth` defaults to non-blocking behavior; pass `--wait` to block/poll until completion.
-- `auth` output key behavior:
-  - no `-o`: do not overwrite any key ref
-  - `-o` (no value): overwrite the input `-k` key ref
-  - `-o KEY_REF`: write to a different key ref
-- CLI parsing should be flexible about option positions:
-  - command/subcommand options may appear before or after positional arguments (when unambiguous)
-  - known root/global logging options may appear after subcommands/arguments and are normalized before parse
+- `-o / --overwrite` allows replacing an existing `KEY_REF` value when persisting tokens.
 
 ## JSON Output Contract
 
@@ -89,15 +86,15 @@ The CLI must support both agent-driven and human-driven use.
 
 ### Human usage
 
-- `mcat auth ... --wait` runs end-to-end (blocks/polls until token is available).
+- `mcat auth start ... --wait` runs end-to-end (blocks/polls until token is available).
 - It may print instructions for the user to complete a browser/device step.
 - Without `--wait`, it returns a pending result and can be resumed via `auth continue`.
 
 ### Agent usage
 
-- `mcat auth ...` starts auth and returns immediately with a pending result by default.
+- `mcat auth start ...` returns immediately with a pending result by default.
 - The result contains the user action required (URL/code, callback URL, etc.) and a state file path.
-- A later `mcat auth continue --state ...` completes the process and stores/returns the token.
+- A later `mcat auth continue --state ... -k ...` completes the process and stores the token.
 
 ### Wait behavior
 
@@ -135,19 +132,6 @@ Complete (stored to output key ref):
 }
 ```
 
-Complete (returned directly, only if no output ref is provided):
-
-```json
-{
-  "ok": true,
-  "result": {
-    "status": "complete",
-    "access_token": "...",
-    "token_type": "Bearer"
-  }
-}
-```
-
 ## Key Reference (`KEY_REF`)
 
 `KEY_REF` indicates how secrets/tokens are read from or written to storage.
@@ -161,15 +145,15 @@ Supported forms:
 
 ### Semantics
 
-- `-k / --key-ref`: read input key/token from reference
-- `-o / --out-key-ref`: write output key/token to reference
+- `-k / --key-ref`: key/token reference (read config/input and persist output token)
+- `-o / --overwrite`: allow replacing an existing destination value
 
 Auth-specific behavior:
 
 - `-k` may point to a non-existent key ref on first-time auth
-- if `-o` is omitted, auth returns the token but does not overwrite `-k`
-- if `-o` is present without a value, auth overwrites `-k`
-- if `-o` has a value, auth writes to that output key ref
+- if destination exists and `-o` is omitted, write fails with an explicit error
+- if destination is missing, write succeeds without `-o`
+- if destination exists and `-o` is provided, existing value is replaced
 
 Constraints:
 
@@ -216,20 +200,20 @@ The MCP resources surface introduces:
 ```bash
 mcat resource list -s SESS_INFO_FILE [--cursor CURSOR]
 mcat resource read URI -s SESS_INFO_FILE [-o FILE]
-mcat resource template list -s SESS_INFO_FILE [--cursor CURSOR]
+mcat resource list-template -s SESS_INFO_FILE [--cursor CURSOR]
 ```
 
 Mapping:
 
 - `resource list` -> `resources/list` with optional pagination cursor.
 - `resource read` -> `resources/read` with `uri` and output-mode switch via `-o`.
-- `resource template list` -> `resources/templates/list` with optional cursor.
+- `resource list-template` -> `resources/templates/list` with optional cursor.
 
 Output policy (same CLI contract):
 
 - `resource list` result: raw `{resources, nextCursor?}`.
 - `resource read` result (no `-o`): raw `{contents}` where each item is text/blob content.
-- `resource template list` result: raw `{resourceTemplates, nextCursor?}`.
+- `resource list-template` result: raw `{resourceTemplates, nextCursor?}`.
 
 `resource read` output-mode details:
 
@@ -420,7 +404,7 @@ Typer is the preferred framework for v1.
 ### Structure
 
 - Root app: global logging options and shared context
-- `auth` sub-app: start/resume authentication
+- `auth` sub-app: start/continue OAuth authorization flows
 - `resource` sub-app: list/read/templates (and optional watch later)
 - `tool` sub-app: list/call tools
 - `init` command: create session file
@@ -442,7 +426,7 @@ Implementation should remain small, with three main modules:
   - logging setup
   - file utility helpers (atomic write / lock wrapper)
 - `src/mcat_cli/auth.py`
-  - auth flow start/continue
+  - OAuth authorization flow start/continue
   - key ref loading/saving
   - auth provider HTTP calls
 - `src/mcat_cli/mcp.py`
@@ -451,13 +435,13 @@ Implementation should remain small, with three main modules:
   - tool listing/calling
   - MCP transport and request/response logging
 
-Small supporting files are acceptable (e.g. `__init__.py` entry shim), but core logic should stay in these modules.
+Small supporting files are acceptable (for example `main.py` entrypoint and utility modules), but core logic should stay in these modules.
 
 ## v1 Scope Boundaries
 
 Keep v1 intentionally narrow:
 
-- Support device code flow only first
+- Support OAuth authorization flows needed by MCP servers (device and authorization code)
 - Support one MCP transport first
 - No token refresh unless required by the server
 - No global config file
@@ -466,8 +450,8 @@ Keep v1 intentionally narrow:
 
 ## Open Decisions (remaining)
 
-1. Should `auth` require `--state AUTH_STATE_FILE` when not using `--wait`, or auto-generate a temp state file and return its path?
-2. Should `AUTH_STATE_FILE` be deleted automatically after successful `auth continue`, or retained for audit/debugging?
+1. Should `AUTH_STATE_FILE` be deleted automatically after successful `auth continue`, or retained for audit/debugging?
+2. Should a future mode allow omitting `--state` and auto-generating a temp state file?
 
 ## Implementation Order (recommended)
 
@@ -476,7 +460,7 @@ Keep v1 intentionally narrow:
 3. `auth` start/continue with a stubbed provider contract
 4. `init` session file creation
 5. `tool list` / `tool call` MCP transport integration
-6. `resource list` / `resource read` / `resource template list`
+6. `resource list` / `resource read` / `resource list-template`
 7. File locking + atomic write hardening
 8. Docs/examples and smoke tests
 
@@ -484,9 +468,9 @@ Keep v1 intentionally narrow:
 
 The following feedback has been incorporated into this document:
 
-1. Simplify auth flags to `--wait` only, with default non-blocking behavior.
-2. Use device code flow only for v1.
-3. Define `json://path` token storage as a JSON object (for example `access_token`, `refresh_token`, expiry fields).
-4. Return raw `tool call` results in v1 (defer normalization).
-5. Rename `SESSION_FILE` to `SESS_INFO_FILE` to align better with `AUTH_STATE_FILE`.
-6. Add MCP resources support in phases, with list/read/templates first and streaming subscriptions later.
+1. Keep explicit `auth start` / `auth continue` subcommands.
+2. Use OAuth authorization terminology across CLI/docs.
+3. Use `-k/--key-ref` as auth token destination with `-o/--overwrite` as explicit replacement confirmation.
+4. Define `json://path` token storage as a JSON object (for example `access_token`, `refresh_token`, expiry fields).
+5. Return raw `tool call` results in v1 (defer normalization).
+6. Add MCP resources support in phases, with list/read/list-template first and streaming subscriptions later.

@@ -344,7 +344,7 @@ def _decode_single_resource_content(
     elif has_blob:
         try:
             data = base64.b64decode(item["blob"], validate=True)
-        except binascii.Error, ValueError:
+        except (binascii.Error, ValueError):
             raise ValueError(
                 "invalid resources/read response: content blob is not valid base64"
             ) from None
