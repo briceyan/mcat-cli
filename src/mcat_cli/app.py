@@ -166,7 +166,7 @@ def auth_continue(
     )
 
 
-init_cmd = typer.Typer()
+init_cmd = typer.Typer(context_settings={"allow_interspersed_args": True})
 
 
 @init_cmd.callback(invoke_without_command=True)
