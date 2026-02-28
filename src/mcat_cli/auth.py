@@ -18,14 +18,14 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from .util.auth_state import (
-    default_auth_state_file as _default_auth_state_file,
+from .util.auth_info import (
+    default_auth_info_file as _default_auth_state_file,
 )
-from .util.auth_state import (
-    read_auth_state_file as _read_auth_state_file,
+from .util.auth_info import (
+    read_auth_info_doc as _read_auth_state_file,
 )
-from .util.auth_state import (
-    write_auth_state_file as _write_auth_state_file,
+from .util.auth_info import (
+    write_auth_info_doc as _write_auth_state_file,
 )
 from .util.client_info import (
     read_client_info_file as _read_client_info_file,

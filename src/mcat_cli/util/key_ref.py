@@ -22,6 +22,18 @@ class KeyRef:
     raw: str
 
 
+@dataclass(frozen=True, slots=True)
+class JsonTokenFile:
+    access_token: str | None
+    token: str | None
+    refresh_token: str | None
+    token_type: str | None
+    scope: str | None
+    expires_in: int | None
+    expires_at: str | None
+    raw: dict[str, Any]
+
+
 class KeyRefNotFoundError(ValueError):
     pass
 
@@ -142,13 +154,50 @@ def write_key_ref_value(raw: str, payload: Any, *, overwrite: bool = False) -> N
     raise AssertionError("unreachable")
 
 
+def parse_json_token_file(value: Any) -> JsonTokenFile | None:
+    if not isinstance(value, dict):
+        return None
+
+    return JsonTokenFile(
+        access_token=_as_optional_str(value.get("access_token"))
+        or _as_optional_str(value.get("accessToken")),
+        token=_as_optional_str(value.get("token")),
+        refresh_token=_as_optional_str(value.get("refresh_token")),
+        token_type=_as_optional_str(value.get("token_type")),
+        scope=_as_optional_str(value.get("scope")),
+        expires_in=_as_optional_int(value.get("expires_in")),
+        expires_at=_as_optional_str(value.get("expires_at")),
+        raw=dict(value),
+    )
+
+
 def extract_access_token(value: Any) -> str | None:
     if isinstance(value, str):
         token = value.strip()
         return token or None
-    if isinstance(value, dict):
-        for key in ("access_token", "accessToken", "token"):
-            token = value.get(key)
-            if isinstance(token, str) and token.strip():
-                return token.strip()
+    token_file = parse_json_token_file(value)
+    if token_file is not None:
+        return token_file.access_token or token_file.token
+    return None
+
+
+def _as_optional_str(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return None
+
+
+def _as_optional_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
     return None

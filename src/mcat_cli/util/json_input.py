@@ -1,24 +1,13 @@
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Any, Callable
 
+import json5
+
 
 def parse_json_or_json5(text: str, *, source: str) -> Any:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as json_exc:
-        json_msg = json_exc.msg
-
-    try:
-        import json5
-    except ImportError:
-        raise ValueError(
-            f"invalid JSON in {source}: {json_msg} (install `json5` for JSON5 input)"
-        ) from None
-
     try:
         return json5.loads(text)
     except Exception as exc:
