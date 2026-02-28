@@ -27,6 +27,12 @@ from .util.auth_state import (
 from .util.auth_state import (
     write_auth_state_file as _write_auth_state_file,
 )
+from .util.client_info import (
+    read_client_info_file as _read_client_info_file,
+)
+from .util.client_info import (
+    resolve_client_secret_spec as _resolve_client_secret_spec,
+)
 from .util.common import (
     as_optional_str as _as_optional_str,
 )
@@ -1585,7 +1591,7 @@ def _resolve_client_config(
     client_secret_override: str | None,
     client_name_override: str | None,
 ) -> ClientConfig:
-    client_doc = _read_client_info_doc(client_ref)
+    client_info_file = _read_client_info_file(client_ref)
 
     cli_id = _as_optional_str(client_id_override)
     cli_secret_spec = _as_optional_str(client_secret_override)
@@ -1594,21 +1600,12 @@ def _resolve_client_config(
     if cli_name and (cli_id or cli_secret_spec):
         raise ValueError("--client-name conflicts with --client-id/--client-secret")
 
-    file_id = _extract_client_alias_string(client_doc, keys=("id", "client_id"))
-    file_secret_spec = _extract_client_alias_string(
-        client_doc, keys=("secret", "client_secret")
-    )
-    file_name = _extract_client_alias_string(client_doc, keys=("name", "client_name"))
-    file_scope = _coerce_scope_value(client_doc.get("scope", client_doc.get("scopes")))
-    file_audience = _extract_client_alias_string(client_doc, keys=("audience",))
-    file_resource = _extract_client_alias_string(client_doc, keys=("resource",))
-
-    if file_name and (file_id or file_secret_spec):
-        raise ValueError(
-            "client info file cannot combine name with id/client_id or secret/client_secret"
-        )
-    if file_secret_spec and not file_id:
-        raise ValueError("client info file secret/client_secret requires id/client_id")
+    file_id = client_info_file.client_id
+    file_secret_spec = client_info_file.client_secret_spec
+    file_name = client_info_file.client_name
+    file_scope = client_info_file.scope
+    file_audience = client_info_file.audience
+    file_resource = client_info_file.resource
 
     client_id = cli_id or file_id
     client_secret_spec = cli_secret_spec or file_secret_spec
@@ -1671,62 +1668,6 @@ def _default_client_config(
         dynamic_client_name=dynamic_client_name,
         dynamic_client_name_source=dynamic_client_name_source,
     )
-
-
-def _read_client_info_doc(client_ref: str | None) -> dict[str, Any]:
-    if not _as_optional_str(client_ref):
-        return {}
-    assert client_ref is not None
-    try:
-        payload = _read_key_ref(client_ref)
-    except KeyRefNotFoundError:
-        raise ValueError(f"client info file not found: {client_ref}") from None
-    if not isinstance(payload, dict):
-        raise ValueError("client info file must contain a JSON object")
-    return payload
-
-
-def _extract_client_alias_string(
-    payload: dict[str, Any], *, keys: tuple[str, ...]
-) -> str | None:
-    for key in keys:
-        value = _as_optional_str(payload.get(key))
-        if value:
-            return value
-    return None
-
-
-def _resolve_client_secret_spec(secret_spec: str) -> str:
-    if "://" not in secret_spec:
-        return secret_spec
-    try:
-        payload = _read_key_ref(secret_spec)
-    except KeyRefNotFoundError:
-        raise ValueError(f"client secret KEY_SPEC not found: {secret_spec}") from None
-    direct = _as_optional_str(payload)
-    if direct:
-        return direct
-    if isinstance(payload, dict):
-        extracted = (
-            _as_optional_str(payload.get("secret"))
-            or _as_optional_str(payload.get("client_secret"))
-            or _as_optional_str(payload.get("value"))
-        )
-        if extracted:
-            return extracted
-    raise ValueError(
-        f"client secret KEY_SPEC must resolve to a string "
-        f'or object with "secret"/"client_secret"/"value": {secret_spec}'
-    )
-
-
-def _coerce_scope_value(value: Any) -> str | None:
-    if isinstance(value, list):
-        parts = [str(x).strip() for x in value if str(x).strip()]
-        return " ".join(parts) if parts else None
-    if isinstance(value, str):
-        return value.strip() or None
-    return None
 
 
 def _auth_http_failure_message(*, prefix: str, exc: HttpJsonError) -> str:
