@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from .atomic_files import write_text_atomic
 from .common import maybe_parse_json_scalar
 from .env_file import read_env_file, write_env_var
+from .json_value_file import (
+    JsonValueFileNotFoundError,
+    read_json_value,
+    write_json_value,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,13 +94,14 @@ def read_key_ref_value(raw: str) -> Any:
 
     if ref.kind == "json":
         assert ref.path is not None
-        path = Path(ref.path)
-        if not path.exists():
-            raise KeyRefNotFoundError(f"json key file not found: {ref.path}")
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid JSON in {ref.path}: {exc.msg}") from None
+            return read_json_value(
+                ref.path,
+                not_found_message=f"json key file not found: {ref.path}",
+                invalid_json_prefix=f"invalid JSON in {ref.path}",
+            )
+        except JsonValueFileNotFoundError as exc:
+            raise KeyRefNotFoundError(str(exc)) from None
 
     raise AssertionError("unreachable")
 
@@ -111,15 +115,12 @@ def write_key_ref_value(raw: str, payload: Any, *, overwrite: bool = False) -> N
 
     if ref.kind == "json":
         assert ref.path is not None
-        path = Path(ref.path)
-        if path.exists() and not overwrite:
-            raise ValueError(
-                f"json key file exists: {ref.path} (use --overwrite to replace)"
-            )
-        content = (
-            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+        write_json_value(
+            ref.path,
+            payload,
+            overwrite=overwrite,
+            exists_message=f"json key file exists: {ref.path} (use --overwrite to replace)",
         )
-        write_text_atomic(ref.path, content)
         return
 
     if ref.kind == "dotenv":
