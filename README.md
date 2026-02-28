@@ -2,43 +2,55 @@
 
 The model-context access tool for agents and humans.
 
-`mcat` is a small CLI for OAuth + MCP:
-- authorize (`auth start` / `auth continue`)
-- initialize session (`init`)
-- use tools/resources/prompts (`tool`, `resource`, `prompt`)
+`mcat` is a CLI for agents to interact with MCP servers. An agent can learn the `mcat` skill and then work with any MCP server from only an endpoint.
+
+`mcat` provides:
+- `auth start`: start authorization and return action details (URL/code) for humans
+- `auth continue`: resume an auth flow paused for human assistance
+- `init`: run MCP `initialize` and store session info
+- `tool` / `resource` / `prompt`: access server capabilities
+
+Design principles:
+- no implicit defaults for core files; agents choose explicit paths for token/key, auth state, and session info
+- progressive disclosure; agents can start from an endpoint, complete auth/init, then use `tool list` to discover capabilities
 
 ## Install
+
+Use either `pip` or `uv`:
 
 ```bash
 pip install mcat-cli
 ```
 
-Requires Python 3.11+.
-
-## Minimal Flow
-
-1. Authorize (recommended for manual browser flow):
-
 ```bash
-mcat auth start https://your-mcp-server.example/mcp \
-  -k token.json \
-  --state auth.json \
-  --wait
+uv tool install mcat-cli
 ```
 
-Without `--wait`, `auth start` returns pending state and you can finish later:
+Requires Python 3.11+.
+
+## Agent-First Flow
+
+1. Start auth (non-blocking, returns action details for the human):
+
+```bash
+mcat auth start https://mcp.example.com/mcp \
+  -k token.json \
+  --state auth.json
+```
+
+2. After the human finishes browser auth, continue:
 
 ```bash
 mcat auth continue --state auth.json -k token.json
 ```
 
-2. Initialize session:
+3. Initialize MCP session:
 
 ```bash
-mcat init https://your-mcp-server.example/mcp -k token.json -o session.json
+mcat init https://mcp.example.com/mcp -k token.json -o session.json
 ```
 
-3. Use MCP APIs:
+4. Discover and use server utilities:
 
 ```bash
 mcat tool list -s session.json
@@ -51,23 +63,46 @@ mcat prompt list -s session.json
 mcat prompt get PROMPT_NAME -s session.json -i '{"arg":"value"}'
 ```
 
-## Key Ref (`-k/--key-ref`)
+If you are a human using the CLI directly, add `--wait` to `auth start`:
 
-Supported formats:
+```bash
+mcat auth start https://mcp.example.com/mcp -k token.json --state auth.json --wait
+```
+
+## Token and Secret References (`-k/--key-ref`, KEY_SPEC)
+
+Supported patterns:
 - `env://VAR`
 - `.env://path:VAR`
 - `.env://:VAR` (same as `.env://.env:VAR`)
 - `json://path`
-- bare file path (same as `json://path`)
+- `path` (same as `json://path`)
 
 Notes:
 - auth writes token back to `--key-ref`
 - existing destination needs `-o/--overwrite`
 - `env://` is read-only for writes
 
+Examples:
+- Existing token/PAT in environment variable:
+
+```bash
+mcat init https://mcp.example.com/mcp -k env://MCP_TOKEN -o session.json
+```
+
+- Existing token/PAT in `.env` file:
+
+```bash
+mcat init https://mcp.example.com/mcp -k .env://.env:MCP_TOKEN -o session.json
+```
+
+For GitHub MCP usage, if you already have a GitHub PAT, you can reference it from `env://...` or `.env://...` directly.
+
 ## Optional OAuth Client Config
 
-`auth start` accepts optional client inputs:
+Use client config when a provider expects a specific OAuth client (for example, pre-registered client settings in services like Linear, or enterprise OAuth setups).
+
+`auth start` supports:
 - `-c/--client CLIENT_INFO_FILE`
 - `--client-id ID`
 - `--client-secret KEY_SPEC`
@@ -76,11 +111,11 @@ Notes:
 Resolution order:
 1. CLI overrides
 2. `--client` file
-3. built-in default
+3. built-in defaults
 
 Modes:
 - static client mode: resolved `client_id` present
-- dynamic registration: no resolved `client_id`, uses resolved `client_name`
+- dynamic registration mode: no resolved `client_id`, uses resolved `client_name`
 
 Validation:
 - `name` conflicts with `id`/`secret`
@@ -100,11 +135,11 @@ Example client file (static client):
   "id": "your-client-id",
   "secret": "env://OAUTH_CLIENT_SECRET",
   "scope": "mcp:connect",
-  "resource": "https://your-mcp-server.example/mcp"
+  "resource": "https://mcp.example.com/mcp"
 }
 ```
 
-## Output and Logging
+## Output
 
 Most commands emit JSON to stdout:
 
@@ -116,9 +151,23 @@ Most commands emit JSON to stdout:
 {"ok":false,"error":"message"}
 ```
 
-Debug logs are opt-in:
+Resource output modes:
+- `mcat resource read ... -s session.json`: JSON result
+- `mcat resource read ... -s session.json -o file.bin`: save decoded content to file + JSON metadata
+- `mcat resource read ... -s session.json -o -`: write decoded bytes to stdout
+
+## Logging
+
+If something goes wrong, enable logs for `auth`, `mcp`, and `app`:
 
 ```bash
-mcat --log auth:debug --log-stderr auth start ...
-mcat --log mcp:debug --log-file mcat.log tool list -s session.json
+mcat --log auth --log mcp --log app --log-stderr auth start ...
 ```
+
+To include HTTP request/response bodies, use `:debug` level:
+
+```bash
+mcat --log auth:debug --log mcp:debug --log app:debug --log-stderr auth start ...
+```
+
+Logging options are global options and must be placed before the command name.
