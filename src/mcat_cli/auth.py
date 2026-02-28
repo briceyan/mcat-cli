@@ -126,7 +126,14 @@ def start_auth(
 
     client_cfg = _load_client_config_from_key_ref(key_ref)
     oauth_meta = _discover_oauth_metadata(endpoint)
-    if _as_optional_str(oauth_meta.get("device_authorization_endpoint")):
+    selected_flow = _select_auth_flow(oauth_meta)
+    _log_auth_capabilities(
+        endpoint=endpoint,
+        oauth_meta=oauth_meta,
+        client_cfg=client_cfg,
+        selected_flow=selected_flow,
+    )
+    if selected_flow == "device_code":
         return _start_auth_device(
             endpoint=endpoint,
             key_ref=key_ref,
@@ -137,9 +144,7 @@ def start_auth(
             oauth_meta=oauth_meta,
         )
 
-    if _as_optional_str(oauth_meta.get("authorization_endpoint")) and _as_optional_str(
-        oauth_meta.get("token_endpoint")
-    ):
+    if selected_flow == "authorization_code":
         return _start_auth_authorization_code(
             endpoint=endpoint,
             key_ref=key_ref,
@@ -151,6 +156,62 @@ def start_auth(
         )
 
     raise ValueError("unable to discover a supported OAuth login flow")
+
+
+def _select_auth_flow(oauth_meta: dict[str, str]) -> str | None:
+    has_device_flow = bool(_as_optional_str(oauth_meta.get("device_authorization_endpoint")))
+    has_auth_code_flow = bool(
+        _as_optional_str(oauth_meta.get("authorization_endpoint"))
+        and _as_optional_str(oauth_meta.get("token_endpoint"))
+    )
+    if has_device_flow:
+        return "device_code"
+    if has_auth_code_flow:
+        return "authorization_code"
+    return None
+
+
+def _log_auth_capabilities(
+    *,
+    endpoint: str,
+    oauth_meta: dict[str, str],
+    client_cfg: ClientConfig,
+    selected_flow: str | None,
+) -> None:
+    has_device_flow = bool(_as_optional_str(oauth_meta.get("device_authorization_endpoint")))
+    has_auth_code_flow = bool(
+        _as_optional_str(oauth_meta.get("authorization_endpoint"))
+        and _as_optional_str(oauth_meta.get("token_endpoint"))
+    )
+    flows: list[str] = []
+    if has_device_flow:
+        flows.append("device_code")
+    if has_auth_code_flow:
+        flows.append("authorization_code")
+
+    registration_supported = bool(_as_optional_str(oauth_meta.get("registration_endpoint")))
+    if not has_auth_code_flow:
+        registration_mode = "n/a"
+    elif not registration_supported:
+        registration_mode = "not_advertised"
+    elif client_cfg.use_dynamic_registration:
+        registration_mode = "eligible"
+    else:
+        registration_mode = "static_client_configured"
+
+    LOGGER.info(
+        "auth.discovery capabilities endpoint=%s issuer=%s flows=%s selected_flow=%s "
+        "dynamic_registration=%s registration_mode=%s challenged_scope=%s configured_scope=%s resource=%s",
+        endpoint,
+        _as_optional_str(oauth_meta.get("issuer")) or "-",
+        ",".join(flows) if flows else "none",
+        selected_flow or "none",
+        "yes" if registration_supported else "no",
+        registration_mode,
+        _as_optional_str(oauth_meta.get("challenged_scope")) or "-",
+        client_cfg.scope or "-",
+        _as_optional_str(oauth_meta.get("resource")) or client_cfg.resource or "-",
+    )
 
 
 def _existing_valid_token_result(*, endpoint: str, key_ref: str) -> dict[str, Any] | None:
