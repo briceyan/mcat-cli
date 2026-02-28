@@ -75,14 +75,16 @@ def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[st
         _as_optional_str(initialized_resp["headers"].get("mcp-session-id"))
         or session_id
     )
-    if not session_id:
-        raise ValueError(
-            "initialize succeeded but server did not return mcp-session-id"
+    stateless = not bool(session_id)
+    if stateless:
+        LOGGER.info(
+            "mcp.init proceeding without mcp-session-id (server appears stateless)"
         )
 
     session_doc = {
         "version": 1,
         "session_id": session_id,
+        "session_mode": "stateless" if stateless else "stateful",
         "key_ref": normalized_key_ref,
         "endpoint": normalized_endpoint,
     }
@@ -94,10 +96,13 @@ def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[st
         if isinstance(server_capabilities, dict):
             session_doc["server_capabilities"] = server_capabilities
     _write_session_info(sess_info_file, session_doc)
-    return {
-        "session_id": session_doc["session_id"],
+    result: dict[str, Any] = {
         "session_file": str(Path(sess_info_file)),
+        "session_mode": session_doc["session_mode"],
     }
+    if session_doc["session_id"]:
+        result["session_id"] = session_doc["session_id"]
+    return result
 
 
 def list_tools(*, sess_info_file: str) -> dict[str, Any]:
@@ -114,7 +119,8 @@ def list_tools(*, sess_info_file: str) -> dict[str, Any]:
         result = {"tools": tools}
     else:
         result = {"messages": rpc["messages"]}
-    result["session_id"] = rpc["session_id"]
+    if rpc["session_id"]:
+        result["session_id"] = rpc["session_id"]
     return result
 
 
@@ -245,13 +251,15 @@ def read_resource_decoded_bytes(
     data, content_meta = _decode_single_resource_content(
         result, requested_uri=resolved_uri
     )
-    return data, {
+    meta: dict[str, Any] = {
         "uri": content_meta["uri"],
         "mime_type": content_meta["mime_type"],
         "content_index": content_meta["content_index"],
         "content_kind": content_meta["content_kind"],
-        "session_id": rpc["session_id"],
     }
+    if rpc["session_id"]:
+        meta["session_id"] = rpc["session_id"]
+    return data, meta
 
 
 def save_resource(*, uri: str, sess_info_file: str, out_file: str) -> dict[str, Any]:
@@ -267,15 +275,17 @@ def save_resource(*, uri: str, sess_info_file: str, out_file: str) -> dict[str, 
             f"unable to write decoded resource file {target}: {exc}"
         ) from None
 
-    return {
+    result: dict[str, Any] = {
         "saved": str(Path(target)),
         "bytes": len(data),
         "uri": meta["uri"],
         "mime_type": meta["mime_type"],
         "content_index": meta["content_index"],
         "content_kind": meta["content_kind"],
-        "session_id": meta["session_id"],
     }
+    if meta.get("session_id"):
+        result["session_id"] = meta["session_id"]
+    return result
 
 
 def _invoke_session_method(
@@ -311,12 +321,15 @@ def _invoke_session_method(
 
     if active_session_id != existing_session_id:
         session_doc["session_id"] = active_session_id
+        session_doc["session_mode"] = "stateful" if active_session_id else "stateless"
         _write_session_info(sess_info_file, session_doc)
 
     return {"messages": resp["messages"], "session_id": active_session_id}
 
 
-def _load_active_session(sess_info_file: str) -> tuple[dict[str, Any], str, str, str]:
+def _load_active_session(
+    sess_info_file: str,
+) -> tuple[dict[str, Any], str, str, str | None]:
     session_doc = _read_session_info(sess_info_file)
     endpoint = _normalize_url(
         _require_str(session_doc.get("endpoint"), "endpoint"),
@@ -325,8 +338,6 @@ def _load_active_session(sess_info_file: str) -> tuple[dict[str, Any], str, str,
     key_ref = _normalize_key_ref(_require_str(session_doc.get("key_ref"), "key_ref"))
     token = _resolve_access_token_from_key_ref(key_ref)
     session_id = _as_optional_str(session_doc.get("session_id"))
-    if not session_id:
-        raise ValueError("session info file is missing session_id; run `mcat init`")
     return session_doc, endpoint, token, session_id
 
 
@@ -351,7 +362,7 @@ def _require_prompts_capability(session_doc: dict[str, Any]) -> None:
 
 
 def _result_with_session_id(
-    messages: list[dict[str, Any]], session_id: str
+    messages: list[dict[str, Any]], session_id: str | None
 ) -> dict[str, Any]:
     raw_result = _extract_first_result(messages)
     result: dict[str, Any]
@@ -361,7 +372,8 @@ def _result_with_session_id(
         result = {"value": raw_result}
     else:
         result = {"messages": messages}
-    result["session_id"] = session_id
+    if session_id:
+        result["session_id"] = session_id
     return result
 
 
