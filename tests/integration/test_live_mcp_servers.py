@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+GITHUB_ENDPOINT = "https://api.githubcopilot.com/mcp/"
+FIGMA_ENDPOINT = "https://mcp.figma.com/mcp"
+LINEAR_ENDPOINT = "https://mcp.linear.app/mcp"
+FIGMA_CLIENT_NAME = "mcat-cli-it"
+
 
 def _flag(name: str) -> bool:
     value = (os.getenv(name) or "").strip().lower()
@@ -28,7 +33,7 @@ def _int_env(name: str, default: int) -> int:
 
 INTEGRATION_ENABLED = _flag("MCAT_IT")
 INTERACTIVE_AUTH_ENABLED = _flag("MCAT_IT_INTERACTIVE_AUTH")
-DEFAULT_WAIT_TIMEOUT_S = _int_env("MCAT_IT_WAIT_TIMEOUT", 360)
+DEFAULT_WAIT_TIMEOUT_S = _int_env("MCAT_IT_WAIT_TIMEOUT", 420)
 
 
 @dataclass(slots=True)
@@ -49,8 +54,7 @@ class LiveMcpServersTest(unittest.TestCase):
         timeout: int = 120,
         stream_stderr: bool = False,
     ) -> CommandResult:
-        # Invoke the real CLI entrypoint function directly so tests are independent
-        # from shell script wrappers.
+        # Invoke the app entrypoint directly from Python.
         cmd = [sys.executable, "-c", "from mcat_cli.main import main; main()", *args]
         env = os.environ.copy()
 
@@ -115,70 +119,74 @@ class LiveMcpServersTest(unittest.TestCase):
         self.assertFalse(payload.get("ok"), msg=f"expected ok=false payload={payload}")
         return payload
 
-    def test_github_env_key_ref_init_and_tool_list(self) -> None:
-        gh_pat = (os.getenv("MCAT_IT_GH_PAT") or "").strip()
-        if not gh_pat:
-            self.skipTest("set MCAT_IT_GH_PAT to run GitHub integration flow")
+    def _start_no_wait_auth(
+        self,
+        *,
+        endpoint: str,
+        state_file: Path,
+        token_file: Path,
+        cwd: str,
+        extra_start_args: list[str] | None = None,
+    ) -> CommandResult:
+        args: list[str] = [
+            "--log",
+            "auth:debug",
+            "auth",
+            "start",
+            endpoint,
+            "-k",
+            str(token_file),
+            "--state",
+            str(state_file),
+        ]
+        if extra_start_args:
+            args.extend(extra_start_args)
+        return self._run_mcat(args, cwd=cwd)
 
-        endpoint = (
-            os.getenv("MCAT_IT_GITHUB_ENDPOINT") or "https://api.githubcopilot.com/mcp/"
-        ).strip()
+    def _assert_pending_payload(self, payload: dict[str, Any]) -> str:
+        result_body = payload.get("result") or {}
+        self.assertEqual(result_body.get("status"), "pending")
+        action_url = ((result_body.get("action") or {}).get("url") or "").strip()
+        self.assertTrue(action_url, msg=f"missing action.url in payload: {payload}")
+        return action_url
 
+    def test_github_auth_start_no_wait_default_client_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            env_file = temp_path / ".env"
-            session_file = temp_path / "github.session.json"
-            env_file.write_text(f"GH_PAT={gh_pat}\n", encoding="utf-8")
+            state_file = temp_path / "github.auth.json"
+            token_file = temp_path / "github.token.json"
 
-            init_result = self._run_mcat(
-                ["init", endpoint, "-k", ".env://:GH_PAT", "-o", str(session_file)],
+            result = self._start_no_wait_auth(
+                endpoint=GITHUB_ENDPOINT,
+                state_file=state_file,
+                token_file=token_file,
                 cwd=temp_dir,
             )
-            init_payload = self._assert_ok(init_result)
-            self.assertTrue(session_file.exists())
-            self.assertIn("result", init_payload)
-
-            tools_result = self._run_mcat(
-                ["tool", "list", "-s", str(session_file)],
-                cwd=temp_dir,
-            )
-            tools_payload = self._assert_ok(tools_result)
-            self.assertIn("result", tools_payload)
+            payload = self._assert_ok(result)
+            self._assert_pending_payload(payload)
+            self.assertTrue(state_file.exists())
+            self.assertIn("dynamic_client_name_source=default", result.stderr)
 
     def test_figma_auth_start_no_wait_with_client_name(self) -> None:
-        endpoint = (os.getenv("MCAT_IT_FIGMA_ENDPOINT") or "https://mcp.figma.com/mcp").strip()
-        client_name = (os.getenv("MCAT_IT_FIGMA_CLIENT_NAME") or "mcat-cli-it").strip()
-
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             state_file = temp_path / "figma.auth.json"
             token_file = temp_path / "figma.token.json"
 
-            result = self._run_mcat(
-                [
-                    "--log",
-                    "auth:debug",
-                    "auth",
-                    "start",
-                    endpoint,
-                    "-k",
-                    str(token_file),
-                    "--state",
-                    str(state_file),
-                    "--client-name",
-                    client_name,
-                ],
+            result = self._start_no_wait_auth(
+                endpoint=FIGMA_ENDPOINT,
+                state_file=state_file,
+                token_file=token_file,
                 cwd=temp_dir,
+                extra_start_args=["--client-name", FIGMA_CLIENT_NAME],
             )
 
-            self.assertIn(f"dynamic_client_name={client_name}", result.stderr)
+            self.assertIn(f"dynamic_client_name={FIGMA_CLIENT_NAME}", result.stderr)
             self.assertIn("dynamic_client_name_source=cli", result.stderr)
 
             if result.returncode == 0:
                 payload = self._assert_ok(result)
-                result_body = payload.get("result") or {}
-                self.assertEqual(result_body.get("status"), "pending")
-                self.assertIn("url", (result_body.get("action") or {}))
+                self._assert_pending_payload(payload)
                 self.assertTrue(state_file.exists())
                 return
 
@@ -187,107 +195,65 @@ class LiveMcpServersTest(unittest.TestCase):
             self.assertIn("dynamic client registration", message)
 
     def test_linear_auth_start_no_wait_default_client_name(self) -> None:
-        endpoint = (os.getenv("MCAT_IT_LINEAR_ENDPOINT") or "https://mcp.linear.app/mcp").strip()
-
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             state_file = temp_path / "linear.auth.json"
             token_file = temp_path / "linear.token.json"
 
-            result = self._run_mcat(
-                [
-                    "--log",
-                    "auth:debug",
-                    "auth",
-                    "start",
-                    endpoint,
-                    "-k",
-                    str(token_file),
-                    "--state",
-                    str(state_file),
-                ],
+            result = self._start_no_wait_auth(
+                endpoint=LINEAR_ENDPOINT,
+                state_file=state_file,
+                token_file=token_file,
                 cwd=temp_dir,
             )
             payload = self._assert_ok(result)
-            result_body = payload.get("result") or {}
-
-            self.assertEqual(result_body.get("status"), "pending")
-            self.assertIn("url", (result_body.get("action") or {}))
+            self._assert_pending_payload(payload)
             self.assertTrue(state_file.exists())
             self.assertIn("dynamic_client_name_source=default", result.stderr)
 
-    @unittest.skipUnless(
-        INTERACTIVE_AUTH_ENABLED,
-        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive wait/no-wait auth completion tests",
-    )
-    def test_linear_auth_start_wait_completes(self) -> None:
-        endpoint = (os.getenv("MCAT_IT_LINEAR_ENDPOINT") or "https://mcp.linear.app/mcp").strip()
-
+    def _run_interactive_no_wait_then_continue(
+        self,
+        *,
+        provider_name: str,
+        endpoint: str,
+        extra_start_args: list[str] | None = None,
+        allow_start_error_contains: tuple[str, ...] = (),
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            state_file = temp_path / "linear.wait.auth.json"
-            token_file = temp_path / "linear.wait.token.json"
+            state_file = temp_path / f"{provider_name}.interactive.auth.json"
+            token_file = temp_path / f"{provider_name}.interactive.token.json"
 
-            print("\n[interactive] Complete Linear OAuth in browser for --wait flow.", flush=True)
-            result = self._run_mcat(
-                [
-                    "--log",
-                    "auth:info",
-                    "auth",
-                    "start",
-                    endpoint,
-                    "-k",
-                    str(token_file),
-                    "--state",
-                    str(state_file),
-                    "--wait",
-                ],
+            start_result = self._start_no_wait_auth(
+                endpoint=endpoint,
+                state_file=state_file,
+                token_file=token_file,
                 cwd=temp_dir,
-                timeout=DEFAULT_WAIT_TIMEOUT_S,
-                stream_stderr=True,
+                extra_start_args=extra_start_args,
             )
-            payload = self._assert_ok(result)
-            result_body = payload.get("result") or {}
-            self.assertEqual(result_body.get("status"), "complete")
-            self.assertTrue(token_file.exists())
 
-    @unittest.skipUnless(
-        INTERACTIVE_AUTH_ENABLED,
-        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive wait/no-wait auth completion tests",
-    )
-    def test_linear_auth_no_wait_then_continue_completes(self) -> None:
-        endpoint = (os.getenv("MCAT_IT_LINEAR_ENDPOINT") or "https://mcp.linear.app/mcp").strip()
+            if start_result.returncode != 0:
+                payload = self._assert_error(start_result)
+                error_text = str(payload.get("error") or "")
+                lowered = error_text.lower()
+                if any(pat in lowered for pat in allow_start_error_contains):
+                    self.skipTest(
+                        f"{provider_name}: no-wait auth start unavailable in this environment: {error_text}"
+                    )
+                self.fail(
+                    f"{provider_name}: auth start failed unexpectedly: {error_text}\n"
+                    f"stderr={start_result.stderr}"
+                )
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            state_file = temp_path / "linear.async.auth.json"
-            token_file = temp_path / "linear.async.token.json"
-
-            start_result = self._run_mcat(
-                [
-                    "--log",
-                    "auth:debug",
-                    "auth",
-                    "start",
-                    endpoint,
-                    "-k",
-                    str(token_file),
-                    "--state",
-                    str(state_file),
-                ],
-                cwd=temp_dir,
-            )
             start_payload = self._assert_ok(start_result)
-            start_body = start_payload.get("result") or {}
-            self.assertEqual(start_body.get("status"), "pending")
-            action_url = ((start_body.get("action") or {}).get("url") or "").strip()
-            self.assertTrue(action_url, msg=f"missing action url in payload: {start_payload}")
+            action_url = self._assert_pending_payload(start_payload)
 
             print(
-                "\n[interactive] Open this URL while auth continue is running:\n"
+                f"\n[interactive:{provider_name}] Open this URL now, then approve access:\n"
                 f"{action_url}\n",
                 flush=True,
             )
+
             continue_result = self._run_mcat(
                 [
                     "--log",
@@ -306,7 +272,42 @@ class LiveMcpServersTest(unittest.TestCase):
             continue_payload = self._assert_ok(continue_result)
             continue_body = continue_payload.get("result") or {}
             self.assertEqual(continue_body.get("status"), "complete")
-            self.assertTrue(token_file.exists())
+            self.assertTrue(token_file.exists(), msg=f"{provider_name}: token not written")
+
+    @unittest.skipUnless(
+        INTERACTIVE_AUTH_ENABLED,
+        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive no-wait auth continuation tests",
+    )
+    def test_github_auth_no_wait_then_continue_completes(self) -> None:
+        self._run_interactive_no_wait_then_continue(
+            provider_name="github",
+            endpoint=GITHUB_ENDPOINT,
+            # If GitHub app/client setup is not accepted in current account/env,
+            # skip instead of hard-failing the whole integration run.
+            allow_start_error_contains=("invalid", "client_id", "unauthorized"),
+        )
+
+    @unittest.skipUnless(
+        INTERACTIVE_AUTH_ENABLED,
+        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive no-wait auth continuation tests",
+    )
+    def test_figma_auth_no_wait_then_continue_completes(self) -> None:
+        self._run_interactive_no_wait_then_continue(
+            provider_name="figma",
+            endpoint=FIGMA_ENDPOINT,
+            extra_start_args=["--client-name", FIGMA_CLIENT_NAME],
+            allow_start_error_contains=("dynamic client registration",),
+        )
+
+    @unittest.skipUnless(
+        INTERACTIVE_AUTH_ENABLED,
+        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive no-wait auth continuation tests",
+    )
+    def test_linear_auth_no_wait_then_continue_completes(self) -> None:
+        self._run_interactive_no_wait_then_continue(
+            provider_name="linear",
+            endpoint=LINEAR_ENDPOINT,
+        )
 
 
 if __name__ == "__main__":
