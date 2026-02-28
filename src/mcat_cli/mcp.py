@@ -589,17 +589,10 @@ def _post_jsonrpc_unix(
             conn.settimeout(60.0)
             conn.connect(socket_path)
             conn.sendall(wire)
-            chunks: list[bytes] = []
-            while True:
-                chunk = conn.recv(65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
+            status, response_headers, response_body = _recv_http_response(conn)
     except OSError as exc:
         raise ValueError(f"network error contacting {endpoint}: {exc}") from None
 
-    raw = b"".join(chunks)
-    status, response_headers, response_body = _parse_http_response(raw)
     body_text = response_body.decode("utf-8", errors="replace")
 
     LOGGER.info("mcp.unix POST %s method=%s -> %s", endpoint, method, status)
@@ -613,11 +606,47 @@ def _post_jsonrpc_unix(
     return {"headers": response_headers, "messages": messages}
 
 
-def _parse_http_response(raw: bytes) -> tuple[int, dict[str, str], bytes]:
-    head, sep, body = raw.partition(b"\r\n\r\n")
+def _recv_http_response(conn: socket.socket) -> tuple[int, dict[str, str], bytes]:
+    raw = bytearray()
+    while b"\r\n\r\n" not in raw:
+        chunk = conn.recv(65536)
+        if not chunk:
+            raise ValueError("invalid HTTP response from unix endpoint")
+        raw.extend(chunk)
+
+    head, sep, body = bytes(raw).partition(b"\r\n\r\n")
     if not sep:
         raise ValueError("invalid HTTP response from unix endpoint")
+    status, headers = _parse_http_response_head(head)
 
+    content_length_text = headers.get("content-length")
+    if content_length_text:
+        try:
+            content_length = int(content_length_text)
+        except ValueError:
+            raise ValueError("invalid HTTP Content-Length from unix endpoint") from None
+        if content_length < 0:
+            raise ValueError("invalid HTTP Content-Length from unix endpoint")
+
+        payload = bytearray(body)
+        while len(payload) < content_length:
+            chunk = conn.recv(65536)
+            if not chunk:
+                raise ValueError("truncated HTTP response from unix endpoint")
+            payload.extend(chunk)
+        return status, headers, bytes(payload[:content_length])
+
+    # Fall back to connection-close framing for servers that omit Content-Length.
+    payload = bytearray(body)
+    while True:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        payload.extend(chunk)
+    return status, headers, bytes(payload)
+
+
+def _parse_http_response_head(head: bytes) -> tuple[int, dict[str, str]]:
     lines = head.split(b"\r\n")
     if not lines:
         raise ValueError("invalid HTTP response from unix endpoint")
@@ -636,7 +665,7 @@ def _parse_http_response(raw: bytes) -> tuple[int, dict[str, str], bytes]:
         headers[key.decode("ascii", errors="replace").strip().lower()] = (
             value.decode("utf-8", errors="replace").strip()
         )
-    return status, headers, body
+    return status, headers
 
 
 def _parse_mcp_response(text: str, content_type: str | None) -> list[dict[str, Any]]:

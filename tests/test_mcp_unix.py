@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import socket
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -104,6 +106,36 @@ class McpUnixTransportTest(unittest.TestCase):
             finally:
                 server.shutdown()
                 server.server_close()
+
+    def test_recv_http_response_reads_content_length_without_waiting_for_close(self) -> None:
+        client, server = socket.socketpair()
+        try:
+            client.settimeout(1.0)
+
+            def writer() -> None:
+                response = (
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 2\r\n"
+                    b"Connection: keep-alive\r\n"
+                    b"\r\n"
+                    b"{}"
+                )
+                server.sendall(response)
+                # Keep socket open briefly to simulate keep-alive behavior.
+                time.sleep(0.3)
+
+            thread = threading.Thread(target=writer)
+            thread.start()
+            status, headers, body = mcp._recv_http_response(client)
+            thread.join()
+
+            self.assertEqual(status, 200)
+            self.assertEqual(headers.get("content-length"), "2")
+            self.assertEqual(body, b"{}")
+        finally:
+            client.close()
+            server.close()
 
 
 if __name__ == "__main__":
