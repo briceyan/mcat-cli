@@ -8,7 +8,7 @@ from typing import Any
 
 from .atomic_files import write_text_atomic
 from .common import maybe_parse_json_scalar
-from .dotenv_format import read_dotenv_file, write_dotenv_var
+from .env_file import read_env_file, write_env_var
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +84,7 @@ def read_key_ref_value(raw: str) -> Any:
 
     if ref.kind == "dotenv":
         assert ref.path is not None and ref.name is not None
-        vars_map = read_dotenv_file(ref.path)
+        vars_map = read_env_file(ref.path)
         if ref.name not in vars_map:
             raise KeyRefNotFoundError(f"variable not found in .env file: {ref.name}")
         return maybe_parse_json_scalar(vars_map[ref.name])
@@ -125,7 +125,7 @@ def write_key_ref_value(raw: str, payload: Any, *, overwrite: bool = False) -> N
     if ref.kind == "dotenv":
         assert ref.path is not None and ref.name is not None
         if not overwrite:
-            vars_map = read_dotenv_file(ref.path)
+            vars_map = read_env_file(ref.path)
             if ref.name in vars_map:
                 raise ValueError(
                     f".env key exists: {ref.name} in {ref.path} (use --overwrite to replace)"
@@ -135,7 +135,7 @@ def write_key_ref_value(raw: str, payload: Any, *, overwrite: bool = False) -> N
             if isinstance(payload, str)
             else json.dumps(payload, separators=(",", ":"))
         )
-        write_dotenv_var(ref.path, ref.name, value)
+        write_env_var(ref.path, ref.name, value)
         return
 
     raise AssertionError("unreachable")

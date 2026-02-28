@@ -4,11 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mcat_cli.util.dotenv_format import read_dotenv_file, write_dotenv_var
+from mcat_cli.util.env_file import read_env_file, write_env_var
 
 
-class DotenvFormatTest(unittest.TestCase):
-    def test_read_dotenv_file_parses_export_comments_and_quotes(self) -> None:
+class EnvFileTest(unittest.TestCase):
+    def test_read_env_file_parses_export_comments_and_quotes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / ".env"
             env_path.write_text(
@@ -25,7 +25,7 @@ class DotenvFormatTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            values = read_dotenv_file(str(env_path))
+            values = read_env_file(str(env_path))
 
             self.assertEqual(
                 values,
@@ -36,24 +36,24 @@ class DotenvFormatTest(unittest.TestCase):
                 },
             )
 
-    def test_write_dotenv_var_replaces_existing_key(self) -> None:
+    def test_write_env_var_replaces_existing_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / ".env"
             env_path.write_text("A='1'\nB='2'\n", encoding="utf-8")
 
-            write_dotenv_var(str(env_path), "A", "new'value")
+            write_env_var(str(env_path), "A", "new'value")
 
             self.assertEqual(
                 env_path.read_text(encoding="utf-8"),
-                "A='new'\"'\"'value'\nB='2'\n",
+                "A='new\\'value'\nB='2'\n",
             )
 
-    def test_write_dotenv_var_appends_missing_key(self) -> None:
+    def test_write_env_var_appends_missing_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / ".env"
             env_path.write_text("A='1'\n", encoding="utf-8")
 
-            write_dotenv_var(str(env_path), "B", "2")
+            write_env_var(str(env_path), "B", "2")
 
             self.assertEqual(env_path.read_text(encoding="utf-8"), "A='1'\nB='2'\n")
 
