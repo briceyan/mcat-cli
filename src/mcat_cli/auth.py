@@ -1093,6 +1093,18 @@ def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
             )
             continue
         if isinstance(meta, dict):
+            LOGGER.debug(
+                "auth.discovery protected-resource selected url=%s has_resource=%s has_authorization_servers=%s",
+                url,
+                "yes" if _as_optional_str(meta.get("resource")) else "no",
+                "yes"
+                if isinstance(meta.get("authorization_servers"), list)
+                and any(
+                    isinstance(s, str) and s.strip()
+                    for s in (meta.get("authorization_servers") or [])
+                )
+                else "no",
+            )
             if not discovered_resource:
                 discovered_resource = _as_optional_str(meta.get("resource"))
             servers = meta.get("authorization_servers")
@@ -1131,6 +1143,9 @@ def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
                 LOGGER.info("auth.discovery auth-server miss url=%s err=%s", url, exc)
                 continue
             if not isinstance(meta, dict):
+                LOGGER.debug(
+                    "auth.discovery auth-server skip url=%s reason=non_json_object", url
+                )
                 continue
             token_endpoint = _as_optional_str(meta.get("token_endpoint"))
             authorization_endpoint = _as_optional_str(
@@ -1149,6 +1164,11 @@ def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
                     "auth.discovery auth-server found issuer=%s but no supported login endpoint",
                     issuer_from_meta,
                 )
+                LOGGER.debug(
+                    "auth.discovery auth-server skip url=%s issuer=%s reason=no_supported_login_endpoint",
+                    url,
+                    issuer_from_meta,
+                )
             if token_endpoint and (device_endpoint or authorization_endpoint):
                 result: dict[str, str] = {
                     "issuer": issuer_from_meta,
@@ -1165,7 +1185,24 @@ def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
                     result["challenged_scope"] = challenged_scope
                 if discovered_resource:
                     result["resource"] = discovered_resource
+                LOGGER.debug(
+                    "auth.discovery auth-server selected url=%s issuer=%s token_endpoint=%s has_device=%s has_authorization=%s has_registration=%s",
+                    url,
+                    issuer_from_meta,
+                    token_endpoint,
+                    "yes" if device_endpoint else "no",
+                    "yes" if authorization_endpoint else "no",
+                    "yes" if registration_endpoint else "no",
+                )
                 return result
+            LOGGER.debug(
+                "auth.discovery auth-server skip url=%s issuer=%s reason=missing_token_or_login_endpoint token_endpoint=%s has_device=%s has_authorization=%s",
+                url,
+                issuer_from_meta,
+                "yes" if token_endpoint else "no",
+                "yes" if device_endpoint else "no",
+                "yes" if authorization_endpoint else "no",
+            )
 
     if found_auth_server_without_supported_flow:
         raise ValueError(
