@@ -25,7 +25,7 @@ LOGGER = logging.getLogger("mcat.proxy")
 
 _START_TIMEOUT_SECONDS = 5.0
 _STOP_TIMEOUT_SECONDS = 5.0
-_IO_TIMEOUT_SECONDS = 90.0
+_IO_TIMEOUT_SECONDS = 20.0
 _ACTIVE_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 
 
@@ -341,14 +341,12 @@ class _StdioBridge:
                     pass
 
     def _write_message(self, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+        line = (json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n").encode(
             "utf-8"
         )
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
         try:
             with self._write_lock:
-                self._stdin.write(header)
-                self._stdin.write(body)
+                self._stdin.write(line)
                 self._stdin.flush()
         except OSError as exc:
             raise ValueError(f"failed to write to stdio MCP server: {exc}") from None
@@ -392,29 +390,46 @@ class _StdioBridge:
 
 
 def _read_stdio_message(stream: Any) -> dict[str, Any] | None:
-    headers: dict[str, str] = {}
+    first_line: bytes | None = None
     while True:
         line = stream.readline()
         if line == b"":
             return None
         if line in {b"\r\n", b"\n"}:
-            break
-        text = line.decode("ascii", errors="replace")
-        if ":" not in text:
             continue
-        key, value = text.split(":", 1)
-        headers[key.strip().lower()] = value.strip()
+        first_line = line
+        break
 
-    length_text = headers.get("content-length")
-    if not length_text or not length_text.isdigit():
-        raise ValueError("invalid stdio frame: missing Content-Length")
-    length = int(length_text)
-    if length < 0:
-        raise ValueError("invalid stdio frame: negative Content-Length")
-
-    body = stream.read(length)
-    if len(body) < length:
+    if first_line is None:
         return None
+
+    # Support legacy Content-Length framing in addition to line-delimited JSON.
+    if first_line.lower().startswith(b"content-length:"):
+        headers: dict[str, str] = {}
+        header_line = first_line
+        while True:
+            text = header_line.decode("ascii", errors="replace")
+            if ":" in text:
+                key, value = text.split(":", 1)
+                headers[key.strip().lower()] = value.strip()
+            header_line = stream.readline()
+            if header_line == b"":
+                return None
+            if header_line in {b"\r\n", b"\n"}:
+                break
+
+        length_text = headers.get("content-length")
+        if not length_text or not length_text.isdigit():
+            raise ValueError("invalid stdio frame: missing Content-Length")
+        length = int(length_text)
+        if length < 0:
+            raise ValueError("invalid stdio frame: negative Content-Length")
+        body = stream.read(length)
+        if len(body) < length:
+            return None
+    else:
+        body = first_line.strip()
+
     try:
         parsed = json.loads(body.decode("utf-8"))
     except json.JSONDecodeError as exc:
