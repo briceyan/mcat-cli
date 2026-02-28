@@ -440,11 +440,6 @@ def _start_auth_authorization_code(
     client_cfg: ClientConfig,
     oauth_meta: dict[str, str],
 ) -> dict[str, Any]:
-    if not wait:
-        raise ValueError(
-            "authorization_code flow is supported only with --wait in this build"
-        )
-
     authz_endpoint = _as_optional_str(oauth_meta.get("authorization_endpoint"))
     token_endpoint = _as_optional_str(oauth_meta.get("token_endpoint"))
     if not authz_endpoint or not token_endpoint:
@@ -452,6 +447,7 @@ def _start_auth_authorization_code(
 
     state_nonce = secrets.token_urlsafe(24)
     callback = _start_oauth_callback_listener(None, state_nonce)
+    resolved_state_file = state_file if wait else (state_file or _default_auth_state_file())
     try:
         registration = _resolve_client_for_authorization_code(
             oauth_meta=oauth_meta,
@@ -487,8 +483,14 @@ def _start_auth_authorization_code(
             authorization_url=auth_url,
             scope=requested_scope,
         )
-        if state_file:
-            _write_auth_state_file(state_file, state_doc)
+        if resolved_state_file:
+            _write_auth_state_file(resolved_state_file, state_doc)
+
+        if not wait:
+            return _pending_result(
+                state_file=_require_state_file_for_pending(resolved_state_file),
+                state=state_doc["state"],
+            )
 
         _print_wait_instructions({"verification_uri_complete": auth_url})
         callback_result = _wait_for_oauth_callback(
@@ -505,10 +507,10 @@ def _start_auth_authorization_code(
             or client_cfg.resource,
         )
 
-        if state_file:
+        if resolved_state_file:
             state_doc["state"]["status"] = "complete"
             state_doc["state"]["completed_at"] = _now_epoch()
-            _write_auth_state_file(state_file, state_doc)
+            _write_auth_state_file(resolved_state_file, state_doc)
         return _finalize_token_result(
             token_payload,
             key_ref=key_ref,
@@ -575,6 +577,8 @@ def _pending_result(*, state_file: str, state: dict[str, Any]) -> dict[str, Any]
         action["url"] = state["verification_uri_complete"]
     elif _as_optional_str(state.get("verification_uri")):
         action["url"] = state["verification_uri"]
+    elif _as_optional_str(state.get("authorization_url")):
+        action["url"] = state["authorization_url"]
 
     if _as_optional_str(state.get("user_code")):
         action["code"] = state["user_code"]
