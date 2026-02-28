@@ -137,6 +137,37 @@ class McpUnixTransportTest(unittest.TestCase):
             client.close()
             server.close()
 
+    def test_recv_http_response_reads_chunked_without_waiting_for_close(self) -> None:
+        client, server = socket.socketpair()
+        try:
+            client.settimeout(1.0)
+
+            def writer() -> None:
+                response = (
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Transfer-Encoding: chunked\r\n"
+                    b"Connection: keep-alive\r\n"
+                    b"\r\n"
+                    b"2\r\n{}\r\n"
+                    b"0\r\n\r\n"
+                )
+                server.sendall(response)
+                # Keep socket open to verify parser does not wait for EOF.
+                time.sleep(0.3)
+
+            thread = threading.Thread(target=writer)
+            thread.start()
+            status, headers, body = mcp._recv_http_response(client)
+            thread.join()
+
+            self.assertEqual(status, 200)
+            self.assertIn("chunked", headers.get("transfer-encoding", ""))
+            self.assertEqual(body, b"{}")
+        finally:
+            client.close()
+            server.close()
+
 
 if __name__ == "__main__":
     unittest.main()

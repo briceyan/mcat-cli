@@ -619,6 +619,11 @@ def _recv_http_response(conn: socket.socket) -> tuple[int, dict[str, str], bytes
         raise ValueError("invalid HTTP response from unix endpoint")
     status, headers = _parse_http_response_head(head)
 
+    transfer_encoding = headers.get("transfer-encoding", "").lower()
+    if "chunked" in transfer_encoding:
+        payload = _read_http_chunked_body(conn, body)
+        return status, headers, payload
+
     content_length_text = headers.get("content-length")
     if content_length_text:
         try:
@@ -644,6 +649,59 @@ def _recv_http_response(conn: socket.socket) -> tuple[int, dict[str, str], bytes
             break
         payload.extend(chunk)
     return status, headers, bytes(payload)
+
+
+def _read_http_chunked_body(conn: socket.socket, initial: bytes) -> bytes:
+    buffer = bytearray(initial)
+    out = bytearray()
+
+    def read_exact(length: int) -> bytes:
+        while len(buffer) < length:
+            chunk = conn.recv(65536)
+            if not chunk:
+                raise ValueError("truncated chunked HTTP response from unix endpoint")
+            buffer.extend(chunk)
+        data = bytes(buffer[:length])
+        del buffer[:length]
+        return data
+
+    def read_line() -> bytes:
+        while True:
+            idx = buffer.find(b"\r\n")
+            if idx >= 0:
+                line = bytes(buffer[:idx])
+                del buffer[: idx + 2]
+                return line
+            chunk = conn.recv(65536)
+            if not chunk:
+                raise ValueError("truncated chunked HTTP response from unix endpoint")
+            buffer.extend(chunk)
+
+    while True:
+        size_line = read_line().decode("ascii", errors="replace").strip()
+        if ";" in size_line:
+            size_text = size_line.split(";", 1)[0].strip()
+        else:
+            size_text = size_line
+        if not size_text:
+            raise ValueError("invalid chunked HTTP response from unix endpoint")
+        try:
+            chunk_size = int(size_text, 16)
+        except ValueError:
+            raise ValueError("invalid chunk size in unix endpoint response") from None
+        if chunk_size < 0:
+            raise ValueError("invalid chunk size in unix endpoint response")
+        if chunk_size == 0:
+            # Trailer headers, terminated by an empty line.
+            while True:
+                trailer_line = read_line()
+                if trailer_line == b"":
+                    return bytes(out)
+            # Unreachable.
+        out.extend(read_exact(chunk_size))
+        line_end = read_exact(2)
+        if line_end != b"\r\n":
+            raise ValueError("invalid chunk framing in unix endpoint response")
 
 
 def _parse_http_response_head(head: bytes) -> tuple[int, dict[str, str]]:
