@@ -1,6 +1,6 @@
 [project]
 name = "mcat-cli"
-version = "0.1.5"
+version = "0.1.6"
 description = "The model-context access tool for agents and humans"
 readme = "README.md"
 authors = [
@@ -8,22 +8,13 @@ authors = [
 ]
 keywords = [
     "mcp",
-    "model-context-protocol",
-    "model context protocol",
-    "progressive disclosure",
-    "agent",
     "cli",
     "oauth",
-    "tool calling",
-    "resources",
-    "mcp debugging",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Topic :: Software Development :: Libraries",
-    "Topic :: Utilities",
     "Environment :: Console",
+    "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
 ]
