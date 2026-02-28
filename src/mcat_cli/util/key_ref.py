@@ -3,15 +3,15 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import json5
+from dataclasses_json import Undefined, dataclass_json
+
+from .atomic_files import write_text_atomic
 from .common import maybe_parse_json_scalar
 from .env_file import read_env_file, write_env_var
-from .json_value_file import (
-    JsonValueFileNotFoundError,
-    read_json_value,
-    write_json_value,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,16 +22,59 @@ class KeyRef:
     raw: str
 
 
+@dataclass_json(undefined=Undefined.EXCLUDE)
 @dataclass(frozen=True, slots=True)
-class JsonTokenFile:
-    access_token: str | None
-    token: str | None
-    refresh_token: str | None
-    token_type: str | None
-    scope: str | None
-    expires_in: int | None
-    expires_at: str | None
-    raw: dict[str, Any]
+class WebToken:
+    access_token: str
+    refresh_token: str | None = None
+    token_type: str | None = None
+    scope: str | None = None
+    expires_in: int | None = None
+    expires_at: str | None = None
+
+    @classmethod
+    def from_value(cls, value: Any) -> WebToken:
+        if isinstance(value, str):
+            token = value.strip()
+            if token:
+                return cls(access_token=token)
+            raise ValueError("KEY_REF does not contain an access token")
+
+        if isinstance(value, dict):
+            access_token = (
+                _as_optional_str(value.get("access_token"))
+                or _as_optional_str(value.get("accessToken"))
+                or _as_optional_str(value.get("token"))
+            )
+            if not access_token:
+                raise ValueError("KEY_REF does not contain an access token")
+            return cls(
+                access_token=access_token,
+                refresh_token=_as_optional_str(value.get("refresh_token")),
+                token_type=_as_optional_str(value.get("token_type")),
+                scope=_as_optional_str(value.get("scope")),
+                expires_in=_as_optional_int(value.get("expires_in")),
+                expires_at=_as_optional_str(value.get("expires_at")),
+            )
+
+        raise ValueError("KEY_REF does not contain an access token")
+
+    def to_json_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"access_token": self.access_token}
+        if self.refresh_token is not None:
+            payload["refresh_token"] = self.refresh_token
+        if self.token_type is not None:
+            payload["token_type"] = self.token_type
+        if self.scope is not None:
+            payload["scope"] = self.scope
+        if self.expires_in is not None:
+            payload["expires_in"] = self.expires_in
+        if self.expires_at is not None:
+            payload["expires_at"] = self.expires_at
+        return payload
+
+    def save(self, key_ref_spec: str, *, overwrite: bool = False) -> None:
+        write_web_token(key_ref_spec, self, overwrite=overwrite)
 
 
 class KeyRefNotFoundError(ValueError):
@@ -66,7 +109,6 @@ def parse_key_ref(raw: str) -> KeyRef:
         return KeyRef(kind="json", path=path, name=None, raw=value)
 
     if "://" not in value:
-        # Convenience shorthand: bare path means json://path.
         return KeyRef(kind="json", path=value, name=None, raw=value)
 
     raise ValueError("invalid KEY_REF scheme (expected env://, .env://, or json://)")
@@ -106,14 +148,13 @@ def read_key_ref_value(raw: str) -> Any:
 
     if ref.kind == "json":
         assert ref.path is not None
+        path = Path(ref.path)
+        if not path.exists():
+            raise KeyRefNotFoundError(f"json key file not found: {ref.path}")
         try:
-            return read_json_value(
-                ref.path,
-                not_found_message=f"json key file not found: {ref.path}",
-                invalid_json_prefix=f"invalid JSON in {ref.path}",
-            )
-        except JsonValueFileNotFoundError as exc:
-            raise KeyRefNotFoundError(str(exc)) from None
+            return json5.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"invalid JSON/JSON5 in {ref.path}: {exc}") from None
 
     raise AssertionError("unreachable")
 
@@ -127,12 +168,13 @@ def write_key_ref_value(raw: str, payload: Any, *, overwrite: bool = False) -> N
 
     if ref.kind == "json":
         assert ref.path is not None
-        write_json_value(
-            ref.path,
-            payload,
-            overwrite=overwrite,
-            exists_message=f"json key file exists: {ref.path} (use --overwrite to replace)",
-        )
+        path = Path(ref.path)
+        if path.exists() and not overwrite:
+            raise ValueError(
+                f"json key file exists: {ref.path} (use --overwrite to replace)"
+            )
+        serialized = json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+        write_text_atomic(ref.path, serialized)
         return
 
     if ref.kind == "dotenv":
@@ -143,42 +185,30 @@ def write_key_ref_value(raw: str, payload: Any, *, overwrite: bool = False) -> N
                 raise ValueError(
                     f".env key exists: {ref.name} in {ref.path} (use --overwrite to replace)"
                 )
-        value = (
-            payload
-            if isinstance(payload, str)
-            else json.dumps(payload, separators=(",", ":"))
-        )
+        value = payload if isinstance(payload, str) else json.dumps(payload, separators=(",", ":"))
         write_env_var(ref.path, ref.name, value)
         return
 
     raise AssertionError("unreachable")
 
 
-def parse_json_token_file(value: Any) -> JsonTokenFile | None:
-    if not isinstance(value, dict):
-        return None
+def read_web_token(raw: str) -> WebToken:
+    return WebToken.from_value(read_key_ref_value(raw))
 
-    return JsonTokenFile(
-        access_token=_as_optional_str(value.get("access_token"))
-        or _as_optional_str(value.get("accessToken")),
-        token=_as_optional_str(value.get("token")),
-        refresh_token=_as_optional_str(value.get("refresh_token")),
-        token_type=_as_optional_str(value.get("token_type")),
-        scope=_as_optional_str(value.get("scope")),
-        expires_in=_as_optional_int(value.get("expires_in")),
-        expires_at=_as_optional_str(value.get("expires_at")),
-        raw=dict(value),
-    )
+
+def write_web_token(raw: str, token: WebToken, *, overwrite: bool = False) -> None:
+    ref = parse_key_ref(raw)
+    if ref.kind == "dotenv":
+        write_key_ref_value(raw, token.access_token, overwrite=overwrite)
+        return
+    write_key_ref_value(raw, token.to_json_payload(), overwrite=overwrite)
 
 
 def extract_access_token(value: Any) -> str | None:
-    if isinstance(value, str):
-        token = value.strip()
-        return token or None
-    token_file = parse_json_token_file(value)
-    if token_file is not None:
-        return token_file.access_token or token_file.token
-    return None
+    try:
+        return WebToken.from_value(value).access_token
+    except ValueError:
+        return None
 
 
 def _as_optional_str(value: Any) -> str | None:

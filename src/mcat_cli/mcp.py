@@ -16,17 +16,11 @@ from .util.common import (
 from .util.common import (
     normalize_url as _normalize_url,
 )
-from .util.json_input import (
-    parse_json_object_input as _parse_json_object_input,
-)
-from .util.key_ref import (
-    extract_access_token as _extract_access_token,
-)
 from .util.key_ref import (
     normalize_key_ref as _normalize_key_ref,
 )
 from .util.key_ref import (
-    read_key_ref_value as _read_key_ref_value,
+    read_web_token as _read_web_token,
 )
 from .util.session_info import (
     read_session_info as _read_session_info,
@@ -127,13 +121,14 @@ def list_tools(*, sess_info_file: str) -> dict[str, Any]:
 
 
 def call_tool(
-    *, tool_name: str, args_input: str, sess_info_file: str
+    *, tool_name: str, arguments: dict[str, Any], sess_info_file: str
 ) -> dict[str, Any]:
     LOGGER.info("mcp.tool.call requested tool_name=%s", tool_name)
     name = tool_name.strip()
     if not name:
         raise ValueError("TOOL_NAME is required")
-    arguments = _parse_tool_arguments(args_input)
+    if not isinstance(arguments, dict):
+        raise ValueError("ARGS must be a JSON object")
 
     rpc = _invoke_session_method(
         sess_info_file=sess_info_file,
@@ -180,7 +175,7 @@ def list_prompts(*, sess_info_file: str, cursor: str | None = None) -> dict[str,
 
 
 def get_prompt(
-    *, prompt_name: str, args_input: str | None, sess_info_file: str
+    *, prompt_name: str, arguments: dict[str, str] | None, sess_info_file: str
 ) -> dict[str, Any]:
     LOGGER.info("mcp.prompt.get requested prompt_name=%s", prompt_name)
     name = prompt_name.strip()
@@ -188,8 +183,10 @@ def get_prompt(
         raise ValueError("PROMPT_NAME is required")
 
     params: dict[str, Any] = {"name": name}
-    arguments = _parse_prompt_arguments(args_input)
     if arguments is not None:
+        for key, value in arguments.items():
+            if not isinstance(value, str):
+                raise ValueError("ARGS for prompts/get must be a JSON object of strings")
         params["arguments"] = arguments
 
     rpc = _invoke_session_method(
@@ -434,22 +431,6 @@ def _normalize_resource_uri(value: str) -> str:
     return text
 
 
-def _parse_tool_arguments(args_input: str) -> dict[str, Any]:
-    return _parse_json_object_input(args_input, label="ARGS")
-
-
-def _parse_prompt_arguments(args_input: str | None) -> dict[str, str] | None:
-    if args_input is None:
-        return None
-    parsed = _parse_tool_arguments(args_input)
-    arguments: dict[str, str] = {}
-    for key, value in parsed.items():
-        if not isinstance(value, str):
-            raise ValueError("ARGS for prompts/get must be a JSON object of strings")
-        arguments[key] = value
-    return arguments
-
-
 def _extract_first_result(messages: list[dict[str, Any]]) -> Any | None:
     for message in messages:
         if "result" in message:
@@ -634,11 +615,7 @@ def _extract_tools(messages: list[dict[str, Any]]) -> list[dict[str, Any]] | Non
 
 
 def _resolve_access_token_from_key_ref(key_ref: str) -> str:
-    payload = _read_key_ref_value(key_ref)
-    token = _extract_access_token(payload)
-    if token:
-        return token
-    raise ValueError("KEY_REF does not contain an access token")
+    return _read_web_token(key_ref).access_token
 
 
 def _require_str(value: Any, field: str) -> str:
