@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from .atomic_files import write_text_atomic
-from .common import maybe_parse_json_scalar, read_dotenv_file
+from .common import maybe_parse_json_scalar
+from .dotenv_format import read_dotenv_file, write_dotenv_var
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +135,7 @@ def write_key_ref_value(raw: str, payload: Any, *, overwrite: bool = False) -> N
             if isinstance(payload, str)
             else json.dumps(payload, separators=(",", ":"))
         )
-        _write_dotenv_var(ref.path, ref.name, value)
+        write_dotenv_var(ref.path, ref.name, value)
         return
 
     raise AssertionError("unreachable")
@@ -150,35 +151,3 @@ def extract_access_token(value: Any) -> str | None:
             if isinstance(token, str) and token.strip():
                 return token.strip()
     return None
-
-
-def _write_dotenv_var(path: str, name: str, value: str) -> None:
-    file_path = Path(path)
-    lines = (
-        file_path.read_text(encoding="utf-8").splitlines(keepends=True)
-        if file_path.exists()
-        else []
-    )
-    encoded_value = _dotenv_quote(value)
-    new_line = f"{name}={encoded_value}\n"
-    replaced = False
-    out_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        candidate = stripped
-        if candidate.startswith("export "):
-            candidate = candidate[len("export ") :].lstrip()
-        if "=" in candidate:
-            key, _ = candidate.split("=", 1)
-            if key.strip() == name:
-                out_lines.append(new_line)
-                replaced = True
-                continue
-        out_lines.append(line if line.endswith("\n") else f"{line}\n")
-    if not replaced:
-        out_lines.append(new_line)
-    write_text_atomic(file_path, "".join(out_lines))
-
-
-def _dotenv_quote(value: str) -> str:
-    return "'" + value.replace("'", "'\"'\"'") + "'"
