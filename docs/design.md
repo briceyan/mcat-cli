@@ -20,7 +20,7 @@ Design priorities:
 - No implicit global mutable state.
 - All state is passed via command-line file paths.
 - Failures return JSON and non-zero exit status.
-- Implementation should stay concise and modular (`app`, `auth`, `mcp`).
+- Implementation should stay concise and modular (`app`, `auth`, `proxy`, `mcp`).
 
 ## Command Surface (v1)
 
@@ -28,8 +28,11 @@ Design priorities:
 mcat [GLOBAL_OPTS] auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE [--wait] [-o] [-c CLIENT_INFO_FILE] [--client-id CLIENT_ID] [--client-secret KEY_SPEC] [--client-name CLIENT_NAME]
 mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE -k KEY_REF [-o]
 
-mcat [GLOBAL_OPTS] init https://host/path -k KEY_REF -o SESS_INFO_FILE
-mcat [GLOBAL_OPTS] init unix:///path/to/mcp.sock -o SESS_INFO_FILE -- CMD [ARG...]
+mcat [GLOBAL_OPTS] proxy up unix:///path/to/stdio.sock -- CMD [ARG...]
+mcat [GLOBAL_OPTS] proxy down unix:///path/to/stdio.sock
+mcat [GLOBAL_OPTS] proxy status unix:///path/to/stdio.sock
+
+mcat [GLOBAL_OPTS] init ENDPOINT -o SESS_INFO_FILE [-k KEY_REF]
 
 mcat [GLOBAL_OPTS] resource list -s SESS_INFO_FILE [--cursor CURSOR]
 mcat [GLOBAL_OPTS] resource read URI -s SESS_INFO_FILE [-o FILE]
@@ -57,8 +60,9 @@ Notes:
 - `-k / --key-ref` is required for `auth start` and `auth continue`.
 - `ENDPOINT` may be `http://...`, `https://...`, or `unix:///...`.
 - `auth` commands are only valid for HTTP(S) endpoints.
+- `init` performs MCP handshake only and writes `SESS_INFO_FILE`.
 - `init` with HTTP(S) endpoint requires `-k / --key-ref`.
-- `init` with `unix://` endpoint uses local stdio bridge mode and requires a launch command after `--`.
+- `init` with `unix://` endpoint requires that `proxy up` has already started a local stdio bridge on that socket.
 - `auth` defaults to non-blocking behavior; pass `--wait` to block/poll until completion.
 - `-o / --overwrite` allows replacing an existing `KEY_REF` value when persisting tokens.
 - `auth start` supports optional OAuth client config via `-c/--client` and overrides via `--client-id`, `--client-secret`, `--client-name`.
@@ -74,8 +78,10 @@ Supported endpoint forms:
 `unix://` endpoint usage is intended for local bridge mode:
 
 ```bash
-mcat init unix:///tmp/a.sock -o sess.info -- codex mcp-server
+mcat proxy up unix:///tmp/stdio.sock -- codex mcp-server
+mcat init unix:///tmp/stdio.sock -o sess.info
 mcat tool list -s sess.info
+mcat proxy down unix:///tmp/stdio.sock
 ```
 
 ## JSON Output Contract
@@ -375,12 +381,9 @@ Unix socket endpoint example:
 {
   "version": 1,
   "transport": "unix",
-  "endpoint": "unix:///tmp/a.sock",
+  "endpoint": "unix:///tmp/stdio.sock",
   "session_mode": "stateless",
-  "launch": {
-    "command": "codex",
-    "args": ["mcp-server"]
-  }
+  "proxy_control_file": "/tmp/stdio.json"
 }
 ```
 
@@ -391,18 +394,41 @@ Notes:
 - `key_ref` is omitted for Unix socket sessions.
 - Session file is the shared transport contract for `tool`/`resource`/`prompt`.
 
-## Stdio Support via Unix Socket
+## Proxy Control File
 
-`init unix:///... -- CMD [ARG...]` enables local stdio-backed MCP servers while keeping
-existing post-init command logic unchanged.
+For a socket endpoint `unix:///path/to/stdio.sock`, proxy lifecycle metadata is stored
+in `/path/to/stdio.json`.
+
+Recommended control file schema:
+
+```json
+{
+  "version": 1,
+  "socket": "/path/to/stdio.sock",
+  "pid": 12345,
+  "command": "codex",
+  "args": ["mcp-server"],
+  "started_at": "2026-02-28T21:00:00Z",
+  "nonce": "random-token"
+}
+```
+
+`proxy down` reads this file, terminates the process, and removes both
+`stdio.sock` and `stdio.json`.
+
+## Stdio Support via Unix Socket + Proxy
+
+`proxy up unix:///... -- CMD [ARG...]` enables local stdio-backed MCP servers while
+keeping `init` focused on MCP handshake.
 
 Design model:
 
-1. `init` starts a local bridge process.
+1. `proxy up` starts a local bridge process.
 2. Bridge launches the stdio MCP command (`CMD [ARG...]`).
 3. Bridge exposes a stable Unix socket at the `unix://` endpoint path.
-4. Session file stores Unix transport metadata.
+4. `init unix:///...` performs standard MCP initialize via that socket and writes `SESS_INFO_FILE`.
 5. `tool` / `resource` / `prompt` commands use the same session-file-driven flow.
+6. `proxy down` ends the bridge lifecycle.
 
 This model allows one reusable endpoint after `init` while preserving the existing
 session-based command surface.
@@ -497,6 +523,7 @@ Typer is the preferred framework for v1.
 
 - Root app: global logging options and shared context
 - `auth` sub-app: start/continue OAuth authorization flows
+- `proxy` sub-app: start/stop/status stdio bridge for Unix endpoint
 - `resource` sub-app: list/read/templates (and optional watch later)
 - `prompt` sub-app: list/get prompts
 - `tool` sub-app: list/call tools
@@ -511,7 +538,7 @@ Typer is the preferred framework for v1.
 
 ## Minimal Module Layout
 
-Implementation should remain small, with three main modules:
+Implementation should remain small, with four main modules:
 
 - `src/mcat_cli/app.py`
   - Typer app and command definitions
@@ -522,6 +549,9 @@ Implementation should remain small, with three main modules:
   - OAuth authorization flow start/continue
   - key ref loading/saving
   - auth provider HTTP calls
+- `src/mcat_cli/proxy.py`
+  - stdio bridge lifecycle (`up` / `down` / `status`)
+  - Unix socket control-file management (`stdio.json`)
 - `src/mcat_cli/mcp.py`
   - session initialization
   - resource listing/reading/template listing
@@ -538,7 +568,7 @@ Keep v1 intentionally narrow:
 - Support OAuth authorization flows needed by MCP servers (device and authorization code)
 - Support two MCP transports:
   - HTTP(S) endpoint
-  - local Unix socket endpoint backed by stdio bridge
+  - local Unix socket endpoint (bridge managed via `proxy` command)
 - No token refresh unless required by the server
 - No global config file
 - No interactive TUI output
@@ -548,16 +578,16 @@ Keep v1 intentionally narrow:
 
 1. Should `AUTH_STATE_FILE` be deleted automatically after successful `auth continue`, or retained for audit/debugging?
 2. Should a future mode allow omitting `--state` and auto-generating a temp state file?
-3. Should `mcat` add an explicit `session close` command for Unix bridge/socket lifecycle cleanup?
+3. Should `proxy up` support auto-restart policy for the wrapped stdio process?
 
 ## Implementation Order (recommended)
 
 1. CLI shell (`mcat`) + JSON success/error helpers + logging scaffolding
 2. `KEY_REF` parsing and read/write backends (`env`, `.env`, `json`)
 3. `auth` start/continue with a stubbed provider contract
-4. `init` session file creation
+4. `proxy` lifecycle for stdio bridge (`up` / `down` / `status`)
 5. MCP transport integration for HTTP(S) and Unix socket endpoints
-6. `init` stdio bridge mode (`unix://... -- CMD [ARG...]`)
+6. `init` session file creation (handshake only, both transports)
 7. `resource list` / `resource read` / `resource list-template`
 8. `prompt list` / `prompt get`
 9. File locking + atomic write hardening
