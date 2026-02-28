@@ -11,6 +11,7 @@ Design priorities:
 - Stable JSON output contract
 - Explicit file-based state (safe for concurrent/interleaved runs)
 - Very small implementation surface (few modules)
+- Multi-transport endpoint model (HTTP and local Unix socket)
 
 ## Principles
 
@@ -27,7 +28,8 @@ Design priorities:
 mcat [GLOBAL_OPTS] auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE [--wait] [-o] [-c CLIENT_INFO_FILE] [--client-id CLIENT_ID] [--client-secret KEY_SPEC] [--client-name CLIENT_NAME]
 mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE -k KEY_REF [-o]
 
-mcat [GLOBAL_OPTS] init ENDPOINT -k KEY_REF -o SESS_INFO_FILE
+mcat [GLOBAL_OPTS] init https://host/path -k KEY_REF -o SESS_INFO_FILE
+mcat [GLOBAL_OPTS] init unix:///path/to/mcp.sock -o SESS_INFO_FILE -- CMD [ARG...]
 
 mcat [GLOBAL_OPTS] resource list -s SESS_INFO_FILE [--cursor CURSOR]
 mcat [GLOBAL_OPTS] resource read URI -s SESS_INFO_FILE [-o FILE]
@@ -53,9 +55,28 @@ Notes:
 - `SESS_INFO_FILE` is also reused by `prompt` commands.
 - `--state AUTH_STATE_FILE` is required for `auth start` and `auth continue`.
 - `-k / --key-ref` is required for `auth start` and `auth continue`.
+- `ENDPOINT` may be `http://...`, `https://...`, or `unix:///...`.
+- `auth` commands are only valid for HTTP(S) endpoints.
+- `init` with HTTP(S) endpoint requires `-k / --key-ref`.
+- `init` with `unix://` endpoint uses local stdio bridge mode and requires a launch command after `--`.
 - `auth` defaults to non-blocking behavior; pass `--wait` to block/poll until completion.
 - `-o / --overwrite` allows replacing an existing `KEY_REF` value when persisting tokens.
 - `auth start` supports optional OAuth client config via `-c/--client` and overrides via `--client-id`, `--client-secret`, `--client-name`.
+
+## Endpoint Syntax (v1)
+
+Supported endpoint forms:
+
+- `https://host/path` (HTTP transport with OAuth support)
+- `http://host/path` (HTTP transport with OAuth support)
+- `unix:///absolute/path/to/socket.sock` (local Unix socket transport)
+
+`unix://` endpoint usage is intended for local bridge mode:
+
+```bash
+mcat init unix:///tmp/a.sock -o sess.info -- codex mcp-server
+mcat tool list -s sess.info
+```
 
 ## JSON Output Contract
 
@@ -336,20 +357,55 @@ Phase B (later, if needed):
 
 ### Session file schema (v1)
 
+HTTP endpoint example:
+
 ```json
 {
   "version": 1,
-  "session_id": "uuid-or-server-session-id",
+  "transport": "http",
+  "endpoint": "https://example.com/mcp",
   "key_ref": "json:///path/to/token.json",
-  "endpoint": "https://example.com/mcp"
+  "session_id": "uuid-or-server-session-id"
+}
+```
+
+Unix socket endpoint example:
+
+```json
+{
+  "version": 1,
+  "transport": "unix",
+  "endpoint": "unix:///tmp/a.sock",
+  "session_mode": "stateless",
+  "launch": {
+    "command": "codex",
+    "args": ["mcp-server"]
+  }
 }
 ```
 
 Notes:
 
 - Versioned for forward compatibility.
-- `key_ref` stores the reference, not the secret value.
-- Session file is intended to be read-only after creation in v1.
+- `key_ref` is required for HTTP transport sessions.
+- `key_ref` is omitted for Unix socket sessions.
+- Session file is the shared transport contract for `tool`/`resource`/`prompt`.
+
+## Stdio Support via Unix Socket
+
+`init unix:///... -- CMD [ARG...]` enables local stdio-backed MCP servers while keeping
+existing post-init command logic unchanged.
+
+Design model:
+
+1. `init` starts a local bridge process.
+2. Bridge launches the stdio MCP command (`CMD [ARG...]`).
+3. Bridge exposes a stable Unix socket at the `unix://` endpoint path.
+4. Session file stores Unix transport metadata.
+5. `tool` / `resource` / `prompt` commands use the same session-file-driven flow.
+
+This model allows one reusable endpoint after `init` while preserving the existing
+session-based command surface.
 
 ## Auth State File
 
@@ -480,7 +536,9 @@ Small supporting files are acceptable (for example `main.py` entrypoint and util
 Keep v1 intentionally narrow:
 
 - Support OAuth authorization flows needed by MCP servers (device and authorization code)
-- Support one MCP transport first
+- Support two MCP transports:
+  - HTTP(S) endpoint
+  - local Unix socket endpoint backed by stdio bridge
 - No token refresh unless required by the server
 - No global config file
 - No interactive TUI output
@@ -490,6 +548,7 @@ Keep v1 intentionally narrow:
 
 1. Should `AUTH_STATE_FILE` be deleted automatically after successful `auth continue`, or retained for audit/debugging?
 2. Should a future mode allow omitting `--state` and auto-generating a temp state file?
+3. Should `mcat` add an explicit `session close` command for Unix bridge/socket lifecycle cleanup?
 
 ## Implementation Order (recommended)
 
@@ -497,11 +556,12 @@ Keep v1 intentionally narrow:
 2. `KEY_REF` parsing and read/write backends (`env`, `.env`, `json`)
 3. `auth` start/continue with a stubbed provider contract
 4. `init` session file creation
-5. `tool list` / `tool call` MCP transport integration
-6. `resource list` / `resource read` / `resource list-template`
-7. `prompt list` / `prompt get`
-8. File locking + atomic write hardening
-9. Docs/examples and smoke tests
+5. MCP transport integration for HTTP(S) and Unix socket endpoints
+6. `init` stdio bridge mode (`unix://... -- CMD [ARG...]`)
+7. `resource list` / `resource read` / `resource list-template`
+8. `prompt list` / `prompt get`
+9. File locking + atomic write hardening
+10. Docs/examples and smoke tests
 
 ## Feedback (Applied)
 
