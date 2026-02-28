@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import json5
 from dataclasses_json import Undefined, dataclass_json
@@ -24,12 +24,12 @@ class SessionInfo:
 
     @classmethod
     def from_doc(cls, doc: dict[str, Any]) -> SessionInfo:
-        session_info = cls.from_dict(doc)
+        session_info = cast(SessionInfo, cast(Any, cls).from_dict(doc))
         session_info.validate()
         return session_info
 
     def to_doc(self) -> dict[str, Any]:
-        return self.to_dict()
+        return cast(dict[str, Any], cast(Any, self).to_dict())
 
     def validate(self) -> None:
         if not isinstance(self.version, int):

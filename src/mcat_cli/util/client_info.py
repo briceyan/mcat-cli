@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from dataclasses_json import Undefined, dataclass_json
 
@@ -30,12 +30,12 @@ class ClientInfo:
         if "name" not in normalized_doc and "client_name" in normalized_doc:
             normalized_doc["name"] = normalized_doc["client_name"]
 
-        client_info = cls.from_dict(normalized_doc)
+        client_info = cast(ClientInfo, cast(Any, cls).from_dict(normalized_doc))
         client_info.validate()
         return client_info
 
     def to_doc(self) -> dict[str, Any]:
-        return self.to_dict()
+        return cast(dict[str, Any], cast(Any, self).to_dict())
 
     def validate(self) -> None:
         if self.name and (self.id or self.secret):

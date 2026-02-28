@@ -4,7 +4,7 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import json5
 from dataclasses_json import Undefined, dataclass_json
@@ -23,12 +23,12 @@ class AuthState:
 
     @classmethod
     def from_doc(cls, doc: dict[str, Any]) -> AuthState:
-        auth_state = cls.from_dict(doc)
+        auth_state = cast(AuthState, cast(Any, cls).from_dict(doc))
         auth_state.validate()
         return auth_state
 
     def to_doc(self) -> dict[str, Any]:
-        return self.to_dict()
+        return cast(dict[str, Any], cast(Any, self).to_dict())
 
     def validate(self) -> None:
         if not isinstance(self.version, int):
