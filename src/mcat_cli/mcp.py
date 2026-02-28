@@ -4,7 +4,6 @@ import base64
 import binascii
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 from urllib import error as urlerror
@@ -16,6 +15,9 @@ from .util.common import (
 )
 from .util.common import (
     normalize_url as _normalize_url,
+)
+from .util.json_input import (
+    parse_json_object_input as _parse_json_object_input,
 )
 from .util.key_ref import (
     extract_access_token as _extract_access_token,
@@ -433,33 +435,7 @@ def _normalize_resource_uri(value: str) -> str:
 
 
 def _parse_tool_arguments(args_input: str) -> dict[str, Any]:
-    spec = args_input.strip()
-    if not spec:
-        raise ValueError("ARGS is required")
-
-    source = "ARGS"
-    if spec == "@-":
-        source = "stdin"
-        text = sys.stdin.read()
-    elif spec.startswith("@"):
-        path = spec[1:].strip()
-        if not path:
-            raise ValueError("invalid ARGS reference: missing file path after @")
-        source = path
-        file_path = Path(path)
-        try:
-            text = file_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            raise ValueError(f"ARGS file not found: {path}") from None
-        except OSError as exc:
-            raise ValueError(f"unable to read ARGS file {path}: {exc}") from None
-    else:
-        text = args_input
-
-    parsed = _parse_json_or_json5(text, source=source)
-    if not isinstance(parsed, dict):
-        raise ValueError("ARGS must be a JSON object")
-    return parsed
+    return _parse_json_object_input(args_input, label="ARGS")
 
 
 def _parse_prompt_arguments(args_input: str | None) -> dict[str, str] | None:
@@ -472,25 +448,6 @@ def _parse_prompt_arguments(args_input: str | None) -> dict[str, str] | None:
             raise ValueError("ARGS for prompts/get must be a JSON object of strings")
         arguments[key] = value
     return arguments
-
-
-def _parse_json_or_json5(text: str, *, source: str) -> Any:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as json_exc:
-        json_msg = json_exc.msg
-
-    try:
-        import json5
-    except ImportError:
-        raise ValueError(
-            f"invalid JSON in {source}: {json_msg} (install `json5` for JSON5 input)"
-        ) from None
-
-    try:
-        return json5.loads(text)
-    except Exception as exc:
-        raise ValueError(f"invalid JSON/JSON5 in {source}: {exc}") from None
 
 
 def _extract_first_result(messages: list[dict[str, Any]]) -> Any | None:
