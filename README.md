@@ -2,17 +2,13 @@
 
 The model-context access tool for agents and humans.
 
-`mcat` is a CLI for agents to interact with MCP servers. An agent can learn the `mcat` skill and then work with any MCP server from only an endpoint.
+`mcat` is a CLI to interact with MCP servers from an endpoint.
 
 `mcat` provides:
-- `auth start`: start authorization and return action details (URL/code) for humans
-- `auth continue`: resume an auth flow paused for human assistance
+- `auth start`: start authorization and return action details (URL/code)
+- `auth continue`: resume a paused auth flow
 - `init`: run MCP `initialize` and store session info
 - `tool` / `resource` / `prompt`: access server capabilities
-
-Design principles:
-- no implicit defaults for core files; agents choose explicit paths for token/key, auth state, and session info
-- progressive disclosure; agents can start from an endpoint, complete auth/init, then use `tool list` to discover capabilities
 
 ## Install
 
@@ -28,9 +24,9 @@ uv tool install mcat-cli
 
 Requires Python 3.11+.
 
-## Agent-First Flow
+## Typical Flow
 
-1. Start auth (non-blocking, returns action details for the human):
+1. Start auth (non-blocking):
 
 ```bash
 mcat auth start https://mcp.example.com/mcp \
@@ -38,7 +34,7 @@ mcat auth start https://mcp.example.com/mcp \
   --state auth.json
 ```
 
-2. After the human finishes browser auth, continue:
+2. Continue auth after browser approval:
 
 ```bash
 mcat auth continue --state auth.json -k token.json

@@ -1,11 +1,11 @@
 ---
 name: mcat
-description: "Use mcat for agent-first MCP workflows: authorize, initialize, discover capabilities, and call tools/resources/prompts with strict JSON handling."
+description: "Use mcat for MCP workflows: authorize, initialize, discover capabilities, and call tools/resources/prompts with strict JSON handling."
 ---
 
 # mcat Skill
 
-Use this workflow when an agent needs MCP access from shell commands.
+Use this workflow when MCP access is needed from shell commands.
 
 ## Install
 
@@ -24,7 +24,7 @@ uv tool install mcat-cli
 1. Treat stdout as machine-readable output.
 2. Parse `{"ok":true|false,...}` for normal commands.
 3. Treat non-zero exit as failure.
-4. Use explicit files chosen by the agent:
+4. Use explicit files:
    - auth state: `--state AUTH_STATE_FILE`
    - token/key destination/source: `-k/--key-ref`
    - session info: `-o/--out` for `init`, `-s/--session` for follow-up commands
@@ -67,16 +67,16 @@ mcat init ENDPOINT -k .env://.env:MCP_TOKEN -o sess.json
 
 For GitHub MCP use, existing PAT can be supplied through these env forms.
 
-## Agent-First Auth Flow
+## Auth Flow
 
-Default agent flow (non-blocking):
+Default non-blocking flow:
 
 ```bash
 mcat auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE
 mcat auth continue --state AUTH_STATE_FILE -k KEY_REF
 ```
 
-`auth start` returns action details for the human to finish browser auth; the agent resumes with `auth continue`.
+`auth start` returns action details for browser approval; then resume with `auth continue`.
 
 Human direct flow:
 
