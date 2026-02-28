@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import secrets
 import sys
 import threading
@@ -51,6 +52,7 @@ DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 DEFAULT_PUBLIC_CLIENT_ID = "mcat-cli"
 DEFAULT_DYNAMIC_CLIENT_NAME = "mcat-cli"
 AUTH_CODE_TIMEOUT_S = 300.0
+MAX_PROVIDER_ERROR_DETAIL_CHARS = 220
 SENSITIVE_LOG_FIELDS = {
     "access_token",
     "refresh_token",
@@ -709,7 +711,9 @@ def _poll_token_once(state: dict[str, Any]) -> dict[str, Any]:
             msg = description or oauth_error
             raise ValueError(f"token request failed: {msg}")
 
-        raise ValueError(f"token request failed (HTTP {exc.status})")
+        raise ValueError(
+            _auth_http_failure_message(prefix="token request failed", exc=exc)
+        )
 
     if not isinstance(token, dict):
         raise ValueError("invalid token response")
@@ -741,14 +745,11 @@ def _start_device_code_flow(
             extra_headers={"Accept": "application/json"},
         )
     except HttpJsonError as exc:
-        payload = exc.payload if isinstance(exc.payload, dict) else {}
-        msg = _as_optional_str(payload.get("error_description")) or _as_optional_str(
-            payload.get("error")
-        )
-        if msg:
-            raise ValueError(f"device authorization request failed: {msg}") from None
         raise ValueError(
-            f"device authorization request failed (HTTP {exc.status})"
+            _auth_http_failure_message(
+                prefix="device authorization request failed",
+                exc=exc,
+            )
         ) from None
 
     if not isinstance(resp, dict):
@@ -842,10 +843,7 @@ def _dynamic_client_registration_error_message(
     client_name: str,
     client_name_source: str,
 ) -> str:
-    payload_obj = exc.payload if isinstance(exc.payload, dict) else {}
-    provider_msg = _as_optional_str(
-        payload_obj.get("error_description")
-    ) or _as_optional_str(payload_obj.get("error"))
+    provider_msg = _provider_error_detail(exc)
     if exc.status in {401, 403}:
         detail = f": {provider_msg}" if provider_msg else ""
         return (
@@ -1077,13 +1075,9 @@ def _exchange_authorization_code(
             extra_headers={"Accept": "application/json"},
         )
     except HttpJsonError as exc:
-        payload = exc.payload if isinstance(exc.payload, dict) else {}
-        msg = _as_optional_str(payload.get("error_description")) or _as_optional_str(
-            payload.get("error")
-        )
-        if msg:
-            raise ValueError(f"token exchange failed: {msg}") from None
-        raise ValueError(f"token exchange failed (HTTP {exc.status})") from None
+        raise ValueError(
+            _auth_http_failure_message(prefix="token exchange failed", exc=exc)
+        ) from None
     if not isinstance(resp, dict):
         raise ValueError("invalid token exchange response")
     if "access_token" not in resp:
@@ -1777,6 +1771,61 @@ def _coerce_scope_value(value: Any) -> str | None:
     if isinstance(value, str):
         return value.strip() or None
     return None
+
+
+def _auth_http_failure_message(*, prefix: str, exc: HttpJsonError) -> str:
+    detail = _provider_error_detail(exc)
+    if detail:
+        return f"{prefix} (HTTP {exc.status}): {detail}"
+    return f"{prefix} (HTTP {exc.status})"
+
+
+def _provider_error_detail(exc: HttpJsonError) -> str | None:
+    payload = exc.payload
+
+    if isinstance(payload, dict):
+        for key in ("error_description", "error", "message", "detail", "title"):
+            value = _as_optional_str(payload.get(key))
+            if value:
+                return _clip_provider_error_detail(value)
+        rendered = _preview_structured_for_log(payload)
+        if rendered:
+            return _clip_provider_error_detail(rendered)
+
+    if isinstance(payload, list):
+        rendered = _preview_structured_for_log(payload)
+        if rendered:
+            return _clip_provider_error_detail(rendered)
+
+    body_text = _as_optional_str(exc.body_text)
+    if body_text:
+        preview = _preview_http_text_for_log(body_text, content_type=None)
+        if preview:
+            return _clip_provider_error_detail(preview)
+    return None
+
+
+def _clip_provider_error_detail(text: str) -> str:
+    compact = _sanitize_error_snippet(text)
+    if len(compact) <= MAX_PROVIDER_ERROR_DETAIL_CHARS:
+        return compact
+    return compact[: MAX_PROVIDER_ERROR_DETAIL_CHARS - 3].rstrip() + "..."
+
+
+_ERROR_KV_RE = re.compile(
+    r"(?i)\b("
+    r"(?:access|refresh|id|client)?_?token|"
+    r"client_secret|secret|password|authorization"
+    r")\b(\s*[:=]\s*)([^\s,;]+)"
+)
+_LONG_OPAQUE_RE = re.compile(r"\b[A-Za-z0-9._~+/=-]{24,}\b")
+
+
+def _sanitize_error_snippet(text: str) -> str:
+    compact = " ".join(text.split())
+    compact = _ERROR_KV_RE.sub(r"\1\2[REDACTED]", compact)
+    compact = _LONG_OPAQUE_RE.sub("[REDACTED]", compact)
+    return compact
 
 
 def _require_state_file_for_pending(path: str | None) -> str:
