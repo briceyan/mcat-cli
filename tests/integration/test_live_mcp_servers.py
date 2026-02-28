@@ -49,7 +49,9 @@ class LiveMcpServersTest(unittest.TestCase):
         timeout: int = 120,
         stream_stderr: bool = False,
     ) -> CommandResult:
-        cmd = [sys.executable, "-m", "mcat_cli.main", *args]
+        # Invoke the real CLI entrypoint function directly so tests are independent
+        # from shell script wrappers.
+        cmd = [sys.executable, "-c", "from mcat_cli.main import main; main()", *args]
         env = os.environ.copy()
 
         if stream_stderr:
