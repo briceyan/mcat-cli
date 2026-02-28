@@ -9,7 +9,7 @@ Use this workflow when an agent needs MCP access from shell commands.
 
 ## Install
 
-If `mcat` is missing, install with either `pip` or `uv`:
+If `mcat` is missing, example install commands:
 
 ```bash
 pip install mcat-cli

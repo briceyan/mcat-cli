@@ -16,7 +16,7 @@ Design principles:
 
 ## Install
 
-Use either `pip` or `uv`:
+Example install commands:
 
 ```bash
 pip install mcat-cli
