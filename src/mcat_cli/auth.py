@@ -45,6 +45,15 @@ from .util.key_ref import (
 from .util.key_ref import (
     write_key_ref_value as _write_key_ref,
 )
+from .util.oauth_discovery import (
+    build_authorization_server_metadata_urls as _build_authorization_server_metadata_urls,
+)
+from .util.oauth_discovery import (
+    build_issuer_candidates as _build_issuer_candidates,
+)
+from .util.oauth_discovery import (
+    build_protected_resource_metadata_urls as _build_protected_resource_metadata_urls,
+)
 
 LOGGER = logging.getLogger("mcat.auth")
 
@@ -1088,17 +1097,14 @@ def _exchange_authorization_code(
 def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
     probe = _probe_mcp_auth(endpoint)
 
-    issuer_candidates: list[str] = []
-    resource_candidates: list[str] = []
+    discovered_authorization_servers: list[str] = []
     discovered_resource: str | None = None
 
-    hinted_resource_metadata = probe.get("resource_metadata")
-    if isinstance(hinted_resource_metadata, str) and hinted_resource_metadata.strip():
-        resource_candidates.append(hinted_resource_metadata.strip())
-
-    resource_candidates.extend(_protected_resource_metadata_urls(endpoint))
-
-    for url in _dedupe(resource_candidates):
+    hinted_resource_metadata = _as_optional_str(probe.get("resource_metadata"))
+    for url in _build_protected_resource_metadata_urls(
+        endpoint,
+        hinted_resource_metadata=hinted_resource_metadata,
+    ):
         try:
             meta = _http_json("GET", url)
         except Exception as exc:
@@ -1123,25 +1129,18 @@ def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
                 discovered_resource = _as_optional_str(meta.get("resource"))
             servers = meta.get("authorization_servers")
             if isinstance(servers, list):
-                issuer_candidates.extend(
+                discovered_authorization_servers.extend(
                     s for s in servers if isinstance(s, str) and s.strip()
                 )
-                if issuer_candidates:
+                if discovered_authorization_servers:
                     break
 
-    hinted_issuer = probe.get("authorization_server")
-    if isinstance(hinted_issuer, str) and hinted_issuer.strip():
-        issuer_candidates.append(hinted_issuer.strip())
-
-    if not issuer_candidates:
-        issuer_candidates.append(endpoint)
-        host_issuer = _mcp_host_issuer(endpoint)
-        if host_issuer:
-            issuer_candidates.append(host_issuer)
-    else:
-        host_issuer = _mcp_host_issuer(endpoint)
-        if host_issuer:
-            issuer_candidates.append(host_issuer)
+    hinted_issuer = _as_optional_str(probe.get("authorization_server"))
+    issuer_candidates = _build_issuer_candidates(
+        endpoint,
+        discovered_authorization_servers=discovered_authorization_servers,
+        hinted_issuer=hinted_issuer,
+    )
 
     seen: set[str] = set()
     found_auth_server_without_supported_flow = False
@@ -1150,7 +1149,7 @@ def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
         if not issuer or issuer in seen:
             continue
         seen.add(issuer)
-        for url in _authorization_server_metadata_urls(issuer):
+        for url in _build_authorization_server_metadata_urls(issuer):
             try:
                 meta = _http_json("GET", url)
             except Exception as exc:
@@ -1223,49 +1222,6 @@ def _discover_oauth_metadata(endpoint: str) -> dict[str, str]:
             "OAuth authorization server metadata found, but no supported login endpoint"
         )
     raise ValueError("unable to discover OAuth authorization endpoints")
-
-
-def _protected_resource_metadata_urls(endpoint: str) -> list[str]:
-    parsed = urlparse.urlsplit(endpoint)
-    if not parsed.scheme or not parsed.netloc:
-        return []
-
-    base = f"{parsed.scheme}://{parsed.netloc}"
-    path = parsed.path.strip("/")
-    urls: list[str] = []
-    if path:
-        urls.append(f"{base}/.well-known/oauth-protected-resource/{path}")
-    urls.append(f"{base}/.well-known/oauth-protected-resource")
-    return _dedupe(urls)
-
-
-def _authorization_server_metadata_urls(issuer: str) -> list[str]:
-    issuer = issuer.rstrip("/")
-    parsed = urlparse.urlsplit(issuer)
-    if not parsed.scheme or not parsed.netloc:
-        return []
-
-    base = f"{parsed.scheme}://{parsed.netloc}"
-    path = parsed.path.strip("/")
-    urls: list[str] = []
-    if path:
-        urls.append(f"{base}/.well-known/oauth-authorization-server/{path}")
-        urls.append(f"{base}/.well-known/openid-configuration/{path}")
-        urls.append(f"{issuer}/.well-known/oauth-authorization-server")
-        urls.append(f"{issuer}/.well-known/openid-configuration")
-    else:
-        urls.append(f"{issuer}/.well-known/oauth-authorization-server")
-        urls.append(f"{issuer}/.well-known/openid-configuration")
-    # Some servers expose metadata directly at the issuer URL.
-    urls.append(issuer)
-    return _dedupe(urls)
-
-
-def _mcp_host_issuer(endpoint: str) -> str | None:
-    parsed = urlparse.urlsplit(endpoint)
-    if not parsed.scheme or not parsed.netloc:
-        return None
-    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _probe_mcp_auth(endpoint: str) -> dict[str, str]:
@@ -1847,16 +1803,6 @@ def _print_wait_instructions(device_flow: dict[str, Any]) -> None:
         print(f"Open: {url}", file=sys.stderr)
     if code:
         print(f"Code: {code}", file=sys.stderr)
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for value in values:
-        if value not in seen:
-            out.append(value)
-            seen.add(value)
-    return out
 
 
 def _as_int(value: Any) -> int | None:
