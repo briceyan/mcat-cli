@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 from urllib import parse as urlparse
+
+import json5
 
 
 def as_optional_str(value: Any) -> str | None:
@@ -26,7 +27,7 @@ def maybe_parse_json_scalar(text: str) -> Any:
         return ""
     if stripped[0] in '{["' or stripped in {"true", "false", "null"}:
         try:
-            return json.loads(stripped)
-        except json.JSONDecodeError:
+            return json5.loads(stripped)
+        except Exception:
             return text
     return text

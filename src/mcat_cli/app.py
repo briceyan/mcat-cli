@@ -4,9 +4,11 @@ import json
 import logging
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, Callable
 
 import click
+import json5
 import typer
 from typer.core import TyperCommand, TyperGroup
 
@@ -356,7 +358,9 @@ def tool_call(
     _ = _runtime(ctx)
     _run_json_command(
         lambda: mcp_mod.call_tool(
-            tool_name=tool_name, args_input=args_input, sess_info_file=sess_info_file
+            tool_name=tool_name,
+            arguments=_parse_cli_json_object(args_input, label="ARGS"),
+            sess_info_file=sess_info_file,
         )
     )
 
@@ -394,7 +398,7 @@ def prompt_get(
     _run_json_command(
         lambda: mcp_mod.get_prompt(
             prompt_name=prompt_name,
-            args_input=args_input,
+            arguments=_parse_prompt_arguments(args_input),
             sess_info_file=sess_info_file,
         )
     )
@@ -483,6 +487,51 @@ def _run_binary_stdout_command(fn: Callable[[], bytes]) -> None:
         _emit_error("internal error")
     sys.stdout.buffer.write(payload)
     sys.stdout.buffer.flush()
+
+
+def _parse_cli_json_object(input_value: str, *, label: str) -> dict[str, Any]:
+    spec = input_value.strip()
+    if not spec:
+        raise ValueError(f"{label} is required")
+
+    source = label
+    if spec == "@-":
+        source = "stdin"
+        text = sys.stdin.read()
+    elif spec.startswith("@"):
+        path = spec[1:].strip()
+        if not path:
+            raise ValueError(f"invalid {label} reference: missing file path after @")
+        source = path
+        file_path = Path(path)
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise ValueError(f"{label} file not found: {path}") from None
+        except OSError as exc:
+            raise ValueError(f"unable to read {label} file {path}: {exc}") from None
+    else:
+        text = input_value
+
+    try:
+        parsed = json5.loads(text)
+    except Exception as exc:
+        raise ValueError(f"invalid JSON/JSON5 in {source}: {exc}") from None
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return parsed
+
+
+def _parse_prompt_arguments(args_input: str | None) -> dict[str, str] | None:
+    if args_input is None:
+        return None
+    parsed = _parse_cli_json_object(args_input, label="ARGS")
+    arguments: dict[str, str] = {}
+    for key, value in parsed.items():
+        if not isinstance(value, str):
+            raise ValueError("ARGS for prompts/get must be a JSON object of strings")
+        arguments[key] = value
+    return arguments
 
 
 def _runtime(ctx: typer.Context) -> GlobalOpts:

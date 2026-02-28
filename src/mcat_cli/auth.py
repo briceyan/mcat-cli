@@ -28,10 +28,10 @@ from .util.auth_state import (
     write_auth_state_file as _write_auth_state_file,
 )
 from .util.client_info import (
-    read_client_info_file as _read_client_info_file,
+    ClientInfo as _ClientInfo,
 )
 from .util.client_info import (
-    resolve_client_secret_spec as _resolve_client_secret_spec,
+    read_client_info as _read_client_info,
 )
 from .util.common import (
     as_optional_str as _as_optional_str,
@@ -43,10 +43,7 @@ from .util.key_ref import (
     KeyRefNotFoundError,
 )
 from .util.key_ref import (
-    extract_access_token as _extract_access_token,
-)
-from .util.key_ref import (
-    read_key_ref_value as _read_key_ref,
+    read_web_token as _read_web_token,
 )
 from .util.key_ref import (
     write_key_ref_value as _write_key_ref,
@@ -257,10 +254,12 @@ def _existing_valid_token_result(*, endpoint: str, key_ref: str) -> dict[str, An
 
 def _read_access_token_from_key_ref(key_ref_raw: str) -> str | None:
     try:
-        payload = _read_key_ref(key_ref_raw)
+        token = _read_web_token(key_ref_raw)
     except KeyRefNotFoundError:
         return None
-    return _extract_access_token(payload)
+    except ValueError:
+        return None
+    return token.access_token
 
 
 def _is_token_valid_for_endpoint(*, endpoint: str, token: str) -> bool:
@@ -1591,7 +1590,7 @@ def _resolve_client_config(
     client_secret_override: str | None,
     client_name_override: str | None,
 ) -> ClientConfig:
-    client_info_file = _read_client_info_file(client_ref)
+    client_info = _read_client_info(client_ref)
 
     cli_id = _as_optional_str(client_id_override)
     cli_secret_spec = _as_optional_str(client_secret_override)
@@ -1600,25 +1599,26 @@ def _resolve_client_config(
     if cli_name and (cli_id or cli_secret_spec):
         raise ValueError("--client-name conflicts with --client-id/--client-secret")
 
-    file_id = client_info_file.client_id
-    file_secret_spec = client_info_file.client_secret_spec
-    file_name = client_info_file.client_name
-    file_scope = client_info_file.scope
-    file_audience = client_info_file.audience
-    file_resource = client_info_file.resource
+    file_id = _as_optional_str(client_info.id)
+    file_secret_spec = _as_optional_str(client_info.secret)
+    file_name = _as_optional_str(client_info.name)
+    file_scope = client_info.resolved_scope()
+    file_audience = _as_optional_str(client_info.audience)
+    file_resource = _as_optional_str(client_info.resource)
 
     client_id = cli_id or file_id
-    client_secret_spec = cli_secret_spec or file_secret_spec
     client_name = cli_name or file_name
 
-    if client_name and (client_id or client_secret_spec):
+    if client_name and (client_id or cli_secret_spec or file_secret_spec):
         raise ValueError("client config cannot combine name with id/client_secret")
-    if client_secret_spec and not client_id:
+    if (cli_secret_spec or file_secret_spec) and not client_id:
         raise ValueError("--client-secret requires --client-id (or id in --client file)")
 
     client_secret: str | None = None
-    if client_secret_spec:
-        client_secret = _resolve_client_secret_spec(client_secret_spec)
+    if cli_secret_spec:
+        client_secret = _ClientInfo(secret=cli_secret_spec).resolved_secret()
+    elif file_secret_spec:
+        client_secret = client_info.resolved_secret()
 
     if client_id:
         LOGGER.info(

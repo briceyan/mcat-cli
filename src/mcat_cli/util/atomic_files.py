@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, TextIO
+from typing import Any, Iterator, TextIO
 
 
 def write_text_atomic(path: str | Path, content: str) -> None:
@@ -59,3 +60,15 @@ def locked_file(path: str | Path, mode: str = "a+") -> Iterator[TextIO]:
             yield file_obj
         finally:
             fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
+
+
+def write_json_object_locked(
+    path: str | Path, payload: dict[str, Any], *, busy_message: str
+) -> None:
+    serialized = json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    lock_path = f"{path}.lock"
+    try:
+        with locked_file(lock_path):
+            write_text_atomic(path, serialized)
+    except BlockingIOError:
+        raise ValueError(busy_message) from None

@@ -5,23 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mcat_cli.util.client_info import (
-    read_client_info_file,
-    resolve_client_secret_spec,
-)
+from mcat_cli.util.client_info import ClientInfo, read_client_info
 
 
-class ClientInfoFileTest(unittest.TestCase):
-    def test_read_client_info_file_empty_ref(self) -> None:
-        info = read_client_info_file(None)
-        self.assertIsNone(info.client_id)
-        self.assertIsNone(info.client_secret_spec)
-        self.assertIsNone(info.client_name)
-        self.assertIsNone(info.scope)
-        self.assertIsNone(info.audience)
-        self.assertIsNone(info.resource)
+class ClientInfoTest(unittest.TestCase):
+    def test_read_client_info_empty_ref(self) -> None:
+        info = read_client_info(None)
+        self.assertEqual(info, ClientInfo())
 
-    def test_read_client_info_file_name_mode(self) -> None:
+    def test_read_client_info_name_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             client_file = Path(temp_dir) / "client.json"
             client_file.write_text(
@@ -36,14 +28,14 @@ class ClientInfoFileTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            info = read_client_info_file(str(client_file))
+            info = read_client_info(str(client_file))
 
-            self.assertEqual(info.client_name, "mcat-cli")
-            self.assertEqual(info.scope, "mcp:connect offline_access")
+            self.assertEqual(info.name, "mcat-cli")
+            self.assertEqual(info.resolved_scope(), "mcp:connect offline_access")
             self.assertEqual(info.audience, "example-api")
             self.assertEqual(info.resource, "https://example.com/mcp")
 
-    def test_read_client_info_file_rejects_name_with_id(self) -> None:
+    def test_read_client_info_rejects_name_with_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             client_file = Path(temp_dir) / "client.json"
             client_file.write_text(
@@ -55,9 +47,9 @@ class ClientInfoFileTest(unittest.TestCase):
                 ValueError,
                 "client info file cannot combine name with id/client_id or secret/client_secret",
             ):
-                read_client_info_file(str(client_file))
+                read_client_info(str(client_file))
 
-    def test_read_client_info_file_rejects_secret_without_id(self) -> None:
+    def test_read_client_info_rejects_secret_without_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             client_file = Path(temp_dir) / "client.json"
             client_file.write_text(
@@ -69,12 +61,12 @@ class ClientInfoFileTest(unittest.TestCase):
                 ValueError,
                 "client info file secret/client_secret requires id/client_id",
             ):
-                read_client_info_file(str(client_file))
+                read_client_info(str(client_file))
 
-    def test_resolve_client_secret_spec_literal(self) -> None:
-        self.assertEqual(resolve_client_secret_spec("plain-secret"), "plain-secret")
+    def test_client_info_resolved_secret_literal(self) -> None:
+        self.assertEqual(ClientInfo(secret="plain-secret").resolved_secret(), "plain-secret")
 
-    def test_resolve_client_secret_spec_key_spec(self) -> None:
+    def test_client_info_resolved_secret_key_spec(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             secret_file = Path(temp_dir) / "secret.json"
             secret_file.write_text(
@@ -82,15 +74,8 @@ class ClientInfoFileTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            resolved = resolve_client_secret_spec(f"json://{secret_file}")
+            resolved = ClientInfo(secret=f"json://{secret_file}").resolved_secret()
             self.assertEqual(resolved, "from-file")
-
-    def test_resolve_client_secret_spec_missing_key_spec(self) -> None:
-        with self.assertRaisesRegex(
-            ValueError,
-            "client secret KEY_SPEC not found: json://missing-file.json",
-        ):
-            resolve_client_secret_spec("json://missing-file.json")
 
 
 if __name__ == "__main__":
