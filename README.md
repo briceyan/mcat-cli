@@ -2,12 +2,10 @@
 
 The model-context access tool for agents and humans.
 
-`mcat` is a concise CLI for:
-- OAuth authorization against MCP servers
-- MCP session initialization
-- tool listing/calling
-- resource listing/reading
-- prompt listing/fetching
+`mcat` is a small CLI for OAuth + MCP:
+- authorize (`auth start` / `auth continue`)
+- initialize session (`init`)
+- use tools/resources/prompts (`tool`, `resource`, `prompt`)
 
 ## Install
 
@@ -17,102 +15,98 @@ pip install mcat-cli
 
 Requires Python 3.11+.
 
-## Quick Start
+## Minimal Flow
 
-1) Start OAuth authorization:
+1. Authorize (recommended for manual browser flow):
 
 ```bash
 mcat auth start https://your-mcp-server.example/mcp \
   -k token.json \
-  --state auth.json
+  --state auth.json \
+  --wait
 ```
 
-This returns a pending result with action details (URL/code).  
-Use `--wait` if you want to block until completion.
-
-2) Complete authorization and store token:
+Without `--wait`, `auth start` returns pending state and you can finish later:
 
 ```bash
 mcat auth continue --state auth.json -k token.json
 ```
 
-If `token.json` already exists, add `-o/--overwrite`.
-
-3) Initialize an MCP session:
+2. Initialize session:
 
 ```bash
 mcat init https://your-mcp-server.example/mcp -k token.json -o session.json
 ```
 
-4) Call MCP tools/resources/prompts:
+3. Use MCP APIs:
 
 ```bash
 mcat tool list -s session.json
-mcat tool call my_tool -i '{"foo":"bar"}' -s session.json
+mcat tool call TOOL_NAME -i '{"key":"value"}' -s session.json
 
 mcat resource list -s session.json
-mcat resource list-template -s session.json
-mcat resource read my://resource -s session.json
+mcat resource read RESOURCE_URI -s session.json
 
 mcat prompt list -s session.json
-mcat prompt get summarize -i '{"topic":"release notes"}' -s session.json
+mcat prompt get PROMPT_NAME -s session.json -i '{"arg":"value"}'
 ```
 
-## KEY_REF Formats
+## Key Ref (`-k/--key-ref`)
 
-`-k/--key-ref` accepts:
+Supported formats:
 - `env://VAR`
 - `.env://path:VAR`
-- `.env://:VAR` (shortcut for `.env://.env:VAR`)
+- `.env://:VAR` (same as `.env://.env:VAR`)
 - `json://path`
 - bare file path (same as `json://path`)
 
-For auth flows, token output is written back to `--key-ref`.
-- Missing destination is allowed (first-time auth).
-- Existing destination requires `-o/--overwrite`.
+Notes:
+- auth writes token back to `--key-ref`
+- existing destination needs `-o/--overwrite`
+- `env://` is read-only for writes
 
-## OAuth Client Config (Optional)
+## Optional OAuth Client Config
 
-`mcat auth start` accepts optional client configuration inputs:
-- `-c/--client path/to/client-info.json`
-- `--client-id`
-- `--client-secret`
-- `--client-name`
+`auth start` accepts optional client inputs:
+- `-c/--client CLIENT_INFO_FILE`
+- `--client-id ID`
+- `--client-secret KEY_SPEC`
+- `--client-name NAME`
 
-Resolution order is deterministic:
+Resolution order:
 1. CLI overrides
-2. `--client` JSON file
-3. Built-in defaults
+2. `--client` file
+3. built-in default
 
-If a resolved `client_id` exists, mcat uses static client mode and skips dynamic registration.
-If no `client_id` is resolved, mcat attempts dynamic registration once using resolved
-`client_name` (`--client-name` > `client.name` > default).
+Modes:
+- static client mode: resolved `client_id` present
+- dynamic registration: no resolved `client_id`, uses resolved `client_name`
 
-`--key-ref` remains token storage only. Client config is not read from key-ref.
+Validation:
+- `name` conflicts with `id`/`secret`
+- `--client-name` conflicts with `--client-id`/`--client-secret`
+- `secret` requires `id`
 
-Example client info files:
+Example client file (dynamic registration):
 
 ```json
-{"name":"Codex"}
+{"name":"your-public-client-name"}
 ```
+
+Example client file (static client):
 
 ```json
 {
-  "id": "abc123",
-  "secret": "env://FIGMA_CLIENT_SECRET",
+  "id": "your-client-id",
+  "secret": "env://OAUTH_CLIENT_SECRET",
   "scope": "mcp:connect",
-  "resource": "https://mcp.figma.com/mcp"
+  "resource": "https://your-mcp-server.example/mcp"
 }
 ```
 
-Validation rules:
-- `name` conflicts with `id`/`secret`.
-- `--client-name` conflicts with `--client-id`/`--client-secret`.
-- `secret` (or `--client-secret`) requires `id` (or `--client-id`).
+## Output and Logging
 
-## Output Contract
-
-Most commands write compact JSON to stdout:
+Most commands emit JSON to stdout:
 
 ```json
 {"ok":true,"result":{}}
@@ -122,13 +116,9 @@ Most commands write compact JSON to stdout:
 {"ok":false,"error":"message"}
 ```
 
-Exception: `mcat resource read ... -o -` writes decoded bytes to stdout.
-
-## Logging
-
-Logs are opt-in:
+Debug logs are opt-in:
 
 ```bash
-mcat --log auth --log-stderr auth start ...
-mcat --log app --log mcp --log-file mcat.log tool list -s session.json
+mcat --log auth:debug --log-stderr auth start ...
+mcat --log mcp:debug --log-file mcat.log tool list -s session.json
 ```

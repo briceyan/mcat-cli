@@ -1,6 +1,6 @@
 ---
 name: mcat
-description: "Use mcat to progressively interact with a user-provided or discovered MCP endpoint: authorize, initialize a session, and run tools/resources/prompts via concise shell JSON."
+description: "Use mcat to authorize against MCP endpoints, initialize sessions, and run tools/resources/prompts with strict JSON output handling."
 ---
 
 # mcat Skill
@@ -9,7 +9,7 @@ Use this workflow when you need MCP access from shell commands.
 
 ## Install
 
-If the `mcat` binary is not available, install package `mcat-cli`:
+If `mcat` is missing:
 
 ```bash
 pip install mcat-cli
@@ -17,51 +17,88 @@ pip install mcat-cli
 
 ## Core Rules
 
-1. Treat `stdout` as machine output.
+1. Treat stdout as machine-readable output.
 2. Parse `{"ok":true|false,...}` for normal commands.
-3. Treat non-zero exit as failure even if text looks parseable.
-4. Use explicit files for state:
+3. Treat non-zero exit as failure.
+4. Use explicit files:
    - auth state: `--state AUTH_STATE_FILE`
-   - session info: `-o/--out` for init, `-s/--session` for reads
-5. Enable logs only when debugging; logs are opt-in and go to `stderr`/file.
+   - session info: `-o/--out` for `init`, `-s/--session` for follow-up commands
+5. Enable logs only for debugging (`--log ...`).
 
-## Key References (`-k/--key-ref`)
+## Help / Usage Behavior
+
+- Top-level command order is `auth`, then `init`, then `tool/resource/prompt`.
+- Missing required args on first-level and second-level commands prints usage/help.
+- Prefer checking `mcat <command> --help` when command construction fails.
+
+## Key Ref (`-k/--key-ref`)
 
 Supported formats:
-
 - `env://VAR`
 - `.env://path:VAR`
-- `.env://:VAR` (shortcut for `.env://.env:VAR`)
+- `.env://:VAR`
 - `json://path`
-- bare file path (same as `json://path`)
+- bare path (same as `json://path`)
 
 Notes:
-
 - `env://` is read-only for writes.
-- For auth writes, existing destinations require `-o/--overwrite`.
-- Missing key-ref destination is allowed for first-time auth.
+- auth writes token back to `--key-ref`.
+- existing key destination needs `-o/--overwrite`.
 
-## Standard Agent Flow
+## Auth Flow
 
-1. Authorize:
+Standard flow:
 
 ```bash
 mcat auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE
-```
-
-2. If pending, continue:
-
-```bash
 mcat auth continue --state AUTH_STATE_FILE -k KEY_REF
 ```
 
-3. Initialize session:
+Human-interactive blocking flow:
+
+```bash
+mcat auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE --wait
+```
+
+Behavior notes:
+- If existing token in `KEY_REF` is valid, `auth start` can finish immediately.
+- OAuth/provider errors include provider detail when available (`error_description`, `error`, `message`, etc.).
+
+## Auth Client Config
+
+`auth start` supports:
+- `-c/--client CLIENT_INFO_FILE`
+- `--client-id ID`
+- `--client-secret KEY_SPEC`
+- `--client-name NAME`
+
+Resolution order:
+1. CLI overrides
+2. client file values
+3. built-in defaults
+
+Rules:
+- `name` conflicts with `id`/`secret`
+- `--client-name` conflicts with `--client-id`/`--client-secret`
+- `secret` requires `id`
+
+Modes:
+- static client mode when `client_id` is resolved
+- dynamic registration when `client_id` is not resolved (uses resolved `client_name`)
+
+## Session Init + Stateless Servers
 
 ```bash
 mcat init ENDPOINT -k KEY_REF -o SESSION_INFO_FILE
 ```
 
-4. Use MCP commands with the session file:
+If server omits `mcp-session-id`, init still succeeds and session is saved with:
+- `session_mode: "stateless"`
+- no `session_id`
+
+Stateful servers include `session_id` and use `session_mode: "stateful"`.
+
+## MCP Calls
 
 ```bash
 mcat tool list -s SESSION_INFO_FILE
@@ -72,31 +109,19 @@ mcat resource list-template -s SESSION_INFO_FILE
 mcat resource read URI -s SESSION_INFO_FILE
 
 mcat prompt list -s SESSION_INFO_FILE
-mcat prompt get PROMPT_NAME -i ARGS -s SESSION_INFO_FILE
+mcat prompt get PROMPT_NAME -s SESSION_INFO_FILE -i ARGS
 ```
 
-## Auth Behavior
-
-- `auth start` may return complete immediately if the existing token in `KEY_REF` is already valid.
-- If not valid, it starts OAuth and returns pending action details.
-- Add `--wait` for human-driven blocking flow.
-
-## ARGS Input
-
-For `-i/--input`:
-
-- `@file` -> read JSON/JSON5 from file
-- `@-` -> read JSON/JSON5 from stdin
+`ARGS` forms for `-i/--input`:
 - inline JSON/JSON5
+- `@file` (JSON/JSON5)
+- `@-` (stdin)
 
 Constraints:
-
-- `tool call`: ARGS must be a JSON object.
-- `prompt get`: ARGS must be a JSON object of string values.
+- `tool call`: ARGS must be a JSON object
+- `prompt get`: ARGS must be a JSON object of string values
 
 ## Output Handling Pattern
-
-Use a strict JSON gate:
 
 ```bash
 resp="$(mcat tool list -s sess.json)"
@@ -108,17 +133,9 @@ fi
 printf '%s\n' "$resp" | jq '.result'
 ```
 
-## Resource Read Modes
-
-- No `-o`: return JSON (`contents`) for agent parsing.
-- `-o FILE`: save decoded bytes to file and return JSON metadata.
-- `-o -`: write decoded bytes directly to stdout (not JSON).
-
 ## Debugging
 
-Enable focused logs only when needed:
-
 ```bash
-mcat --log auth --log-stderr auth start ...
+mcat --log auth:debug --log-stderr auth start ...
 mcat --log mcp:debug --log-file mcat.log tool call ...
 ```
