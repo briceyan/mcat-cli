@@ -11,6 +11,7 @@ Design priorities:
 - Stable JSON output contract
 - Explicit file-based state (safe for concurrent/interleaved runs)
 - Very small implementation surface (few modules)
+- Multi-transport endpoint model (HTTP and local Unix socket)
 
 ## Principles
 
@@ -19,7 +20,7 @@ Design priorities:
 - No implicit global mutable state.
 - All state is passed via command-line file paths.
 - Failures return JSON and non-zero exit status.
-- Implementation should stay concise and modular (`app`, `auth`, `mcp`).
+- Implementation should stay concise and modular (`app`, `auth`, `proxy`, `mcp`).
 
 ## Command Surface (v1)
 
@@ -27,7 +28,11 @@ Design priorities:
 mcat [GLOBAL_OPTS] auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE [--wait] [-o] [-c CLIENT_INFO_FILE] [--client-id CLIENT_ID] [--client-secret KEY_SPEC] [--client-name CLIENT_NAME]
 mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE -k KEY_REF [-o]
 
-mcat [GLOBAL_OPTS] init ENDPOINT -k KEY_REF -o SESS_INFO_FILE
+mcat [GLOBAL_OPTS] proxy up unix:///path/to/proxy.sock -- CMD [ARG...]
+mcat [GLOBAL_OPTS] proxy down unix:///path/to/proxy.sock
+mcat [GLOBAL_OPTS] proxy status unix:///path/to/proxy.sock
+
+mcat [GLOBAL_OPTS] init ENDPOINT -o SESS_INFO_FILE [-k KEY_REF]
 
 mcat [GLOBAL_OPTS] resource list -s SESS_INFO_FILE [--cursor CURSOR]
 mcat [GLOBAL_OPTS] resource read URI -s SESS_INFO_FILE [-o FILE]
@@ -53,9 +58,31 @@ Notes:
 - `SESS_INFO_FILE` is also reused by `prompt` commands.
 - `--state AUTH_STATE_FILE` is required for `auth start` and `auth continue`.
 - `-k / --key-ref` is required for `auth start` and `auth continue`.
+- `ENDPOINT` may be `http://...`, `https://...`, or `unix:///...`.
+- `auth` commands are only valid for HTTP(S) endpoints.
+- `init` performs MCP handshake only and writes `SESS_INFO_FILE`.
+- `init` with HTTP(S) endpoint requires `-k / --key-ref`.
+- `init` with `unix://` endpoint requires that `proxy up` has already started a local stdio bridge on that socket.
 - `auth` defaults to non-blocking behavior; pass `--wait` to block/poll until completion.
 - `-o / --overwrite` allows replacing an existing `KEY_REF` value when persisting tokens.
 - `auth start` supports optional OAuth client config via `-c/--client` and overrides via `--client-id`, `--client-secret`, `--client-name`.
+
+## Endpoint Syntax (v1)
+
+Supported endpoint forms:
+
+- `https://host/path` (HTTP transport with OAuth support)
+- `http://host/path` (HTTP transport with OAuth support)
+- `unix:///absolute/path/to/socket.sock` (local Unix socket transport)
+
+`unix://` endpoint usage is intended for local bridge mode:
+
+```bash
+mcat proxy up unix:///tmp/proxy.sock -- codex mcp-server
+mcat init unix:///tmp/proxy.sock -o sess.info
+mcat tool list -s sess.info
+mcat proxy down unix:///tmp/proxy.sock
+```
 
 ## JSON Output Contract
 
@@ -336,20 +363,78 @@ Phase B (later, if needed):
 
 ### Session file schema (v1)
 
+HTTP endpoint example:
+
 ```json
 {
   "version": 1,
-  "session_id": "uuid-or-server-session-id",
+  "transport": "http",
+  "endpoint": "https://example.com/mcp",
   "key_ref": "json:///path/to/token.json",
-  "endpoint": "https://example.com/mcp"
+  "session_id": "uuid-or-server-session-id"
+}
+```
+
+Unix socket endpoint example:
+
+```json
+{
+  "version": 1,
+  "transport": "unix",
+  "endpoint": "unix:///tmp/proxy.sock",
+  "key_ref": null,
+  "session_id": null,
+  "proxy": "/tmp/proxy.sock.json"
 }
 ```
 
 Notes:
 
 - Versioned for forward compatibility.
-- `key_ref` stores the reference, not the secret value.
-- Session file is intended to be read-only after creation in v1.
+- `key_ref` is required for HTTP transport sessions.
+- `key_ref: null` means no bearer token is sent (or the field may be omitted).
+- `session_id: null` means stateless mode.
+- `proxy` points to the proxy sidecar file for Unix transport sessions.
+- Session file is the shared transport contract for `tool`/`resource`/`prompt`.
+
+## Proxy Control File
+
+For a socket endpoint `unix:///path/to/proxy.sock`, proxy lifecycle metadata is stored
+in `/path/to/proxy.sock.json`.
+
+Recommended control file schema:
+
+```json
+{
+  "version": 1,
+  "socket": "/path/to/proxy.sock",
+  "pid": 12345,
+  "command": "codex",
+  "args": ["mcp-server"],
+  "started_at": "2026-02-28T21:00:00Z",
+  "nonce": "random-token"
+}
+```
+
+`proxy down` reads this file, terminates the process, and removes both
+`proxy.sock` and `proxy.sock.json`.
+
+## Stdio Support via Unix Socket + Proxy
+
+`proxy up unix:///... -- CMD [ARG...]` enables local stdio-backed MCP servers while
+keeping `init` focused on MCP handshake.
+
+Design model:
+
+1. `proxy up` starts a local bridge process.
+2. Bridge launches the stdio MCP command (`CMD [ARG...]`).
+3. Bridge exposes a stable Unix socket at the `unix://` endpoint path.
+4. `init unix:///...` performs standard MCP initialize via that socket and writes `SESS_INFO_FILE`.
+5. `tool` / `resource` / `prompt` commands use the same session-file-driven flow.
+6. `proxy down` ends the bridge lifecycle.
+
+This model allows one reusable endpoint after `init` while preserving the existing
+session-based command surface.
 
 ## Auth State File
 
@@ -441,6 +526,7 @@ Typer is the preferred framework for v1.
 
 - Root app: global logging options and shared context
 - `auth` sub-app: start/continue OAuth authorization flows
+- `proxy` sub-app: start/stop/status stdio bridge for Unix endpoint
 - `resource` sub-app: list/read/templates (and optional watch later)
 - `prompt` sub-app: list/get prompts
 - `tool` sub-app: list/call tools
@@ -455,7 +541,7 @@ Typer is the preferred framework for v1.
 
 ## Minimal Module Layout
 
-Implementation should remain small, with three main modules:
+Implementation should remain small, with four main modules:
 
 - `src/mcat_cli/app.py`
   - Typer app and command definitions
@@ -466,6 +552,9 @@ Implementation should remain small, with three main modules:
   - OAuth authorization flow start/continue
   - key ref loading/saving
   - auth provider HTTP calls
+- `src/mcat_cli/proxy.py`
+  - stdio bridge lifecycle (`up` / `down` / `status`)
+  - Unix socket sidecar-file management (`proxy.sock.json`)
 - `src/mcat_cli/mcp.py`
   - session initialization
   - resource listing/reading/template listing
@@ -480,7 +569,9 @@ Small supporting files are acceptable (for example `main.py` entrypoint and util
 Keep v1 intentionally narrow:
 
 - Support OAuth authorization flows needed by MCP servers (device and authorization code)
-- Support one MCP transport first
+- Support two MCP transports:
+  - HTTP(S) endpoint
+  - local Unix socket endpoint (bridge managed via `proxy` command)
 - No token refresh unless required by the server
 - No global config file
 - No interactive TUI output
@@ -490,18 +581,20 @@ Keep v1 intentionally narrow:
 
 1. Should `AUTH_STATE_FILE` be deleted automatically after successful `auth continue`, or retained for audit/debugging?
 2. Should a future mode allow omitting `--state` and auto-generating a temp state file?
+3. Should `proxy up` support auto-restart policy for the wrapped stdio process?
 
 ## Implementation Order (recommended)
 
 1. CLI shell (`mcat`) + JSON success/error helpers + logging scaffolding
 2. `KEY_REF` parsing and read/write backends (`env`, `.env`, `json`)
 3. `auth` start/continue with a stubbed provider contract
-4. `init` session file creation
-5. `tool list` / `tool call` MCP transport integration
-6. `resource list` / `resource read` / `resource list-template`
-7. `prompt list` / `prompt get`
-8. File locking + atomic write hardening
-9. Docs/examples and smoke tests
+4. `proxy` lifecycle for stdio bridge (`up` / `down` / `status`)
+5. MCP transport integration for HTTP(S) and Unix socket endpoints
+6. `init` session file creation (handshake only, both transports)
+7. `resource list` / `resource read` / `resource list-template`
+8. `prompt list` / `prompt get`
+9. File locking + atomic write hardening
+10. Docs/examples and smoke tests
 
 ## Feedback (Applied)
 
