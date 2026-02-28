@@ -69,9 +69,9 @@ If you are a human using the CLI directly, add `--wait` to `auth start`:
 mcat auth start https://mcp.example.com/mcp -k token.json --state auth.json --wait
 ```
 
-## Token and Secret References (`-k/--key-ref`, KEY_SPEC)
+## Tokens and secrets
 
-Supported patterns:
+Tokens and secrets can be specified by `-k/--key-ref` and `KEY_SPEC` using these patterns:
 - `env://VAR`
 - `.env://path:VAR`
 - `.env://:VAR` (same as `.env://.env:VAR`)
@@ -98,7 +98,7 @@ mcat init https://mcp.example.com/mcp -k .env://.env:MCP_TOKEN -o session.json
 
 For GitHub MCP usage, if you already have a GitHub PAT, you can reference it from `env://...` or `.env://...` directly.
 
-## Optional OAuth Client Config
+## Provide OAuth Client Information
 
 Use client config when a provider expects a specific OAuth client (for example, pre-registered client settings in services like Linear, or enterprise OAuth setups).
 
@@ -155,6 +155,8 @@ Resource output modes:
 - `mcat resource read ... -s session.json`: JSON result
 - `mcat resource read ... -s session.json -o file.bin`: save decoded content to file + JSON metadata
 - `mcat resource read ... -s session.json -o -`: write decoded bytes to stdout
+
+When logging is enabled, log output is sent to stderr by default.
 
 ## Logging
 
