@@ -50,7 +50,6 @@ LOGGER = logging.getLogger("mcat.auth")
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 DEFAULT_PUBLIC_CLIENT_ID = "mcat-cli"
 AUTH_CODE_TIMEOUT_S = 300.0
-HTTP_BODY_LOG_PREVIEW_LIMIT = 240
 SENSITIVE_LOG_FIELDS = {
     "access_token",
     "refresh_token",
@@ -1414,9 +1413,7 @@ def _http_json(
 
 def _preview_structured_for_log(value: Any) -> str:
     sanitized = _redact_for_log(value)
-    return _truncate_for_log(
-        json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False)
-    )
+    return json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False)
 
 
 def _preview_http_text_for_log(text: str, *, content_type: str | None) -> str | None:
@@ -1447,7 +1444,7 @@ def _preview_http_text_for_log(text: str, *, content_type: str | None) -> str | 
         }
         return _preview_structured_for_log(normalized_form)
 
-    return _truncate_for_log(" ".join(stripped.split()))
+    return " ".join(stripped.split())
 
 
 def _redact_for_log(value: Any, *, key: str | None = None) -> Any:
@@ -1477,14 +1474,6 @@ def _is_sensitive_log_field(key: str) -> bool:
     if normalized.endswith("_token"):
         return True
     return False
-
-
-def _truncate_for_log(text: str, *, limit: int = HTTP_BODY_LOG_PREVIEW_LIMIT) -> str:
-    single_line = " ".join(text.split())
-    if len(single_line) <= limit:
-        return single_line
-    remainder = len(single_line) - limit
-    return f"{single_line[:limit]}...(+{remainder} chars)"
 
 
 def _get_header_values(headers: Any, name: str) -> list[str]:
