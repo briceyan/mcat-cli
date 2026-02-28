@@ -28,9 +28,9 @@ Design priorities:
 mcat [GLOBAL_OPTS] auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE [--wait] [-o] [-c CLIENT_INFO_FILE] [--client-id CLIENT_ID] [--client-secret KEY_SPEC] [--client-name CLIENT_NAME]
 mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE -k KEY_REF [-o]
 
-mcat [GLOBAL_OPTS] proxy up unix:///path/to/stdio.sock -- CMD [ARG...]
-mcat [GLOBAL_OPTS] proxy down unix:///path/to/stdio.sock
-mcat [GLOBAL_OPTS] proxy status unix:///path/to/stdio.sock
+mcat [GLOBAL_OPTS] proxy up unix:///path/to/proxy.sock -- CMD [ARG...]
+mcat [GLOBAL_OPTS] proxy down unix:///path/to/proxy.sock
+mcat [GLOBAL_OPTS] proxy status unix:///path/to/proxy.sock
 
 mcat [GLOBAL_OPTS] init ENDPOINT -o SESS_INFO_FILE [-k KEY_REF]
 
@@ -78,10 +78,10 @@ Supported endpoint forms:
 `unix://` endpoint usage is intended for local bridge mode:
 
 ```bash
-mcat proxy up unix:///tmp/stdio.sock -- codex mcp-server
-mcat init unix:///tmp/stdio.sock -o sess.info
+mcat proxy up unix:///tmp/proxy.sock -- codex mcp-server
+mcat init unix:///tmp/proxy.sock -o sess.info
 mcat tool list -s sess.info
-mcat proxy down unix:///tmp/stdio.sock
+mcat proxy down unix:///tmp/proxy.sock
 ```
 
 ## JSON Output Contract
@@ -381,9 +381,10 @@ Unix socket endpoint example:
 {
   "version": 1,
   "transport": "unix",
-  "endpoint": "unix:///tmp/stdio.sock",
-  "session_mode": "stateless",
-  "proxy_control_file": "/tmp/stdio.json"
+  "endpoint": "unix:///tmp/proxy.sock",
+  "key_ref": null,
+  "session_id": null,
+  "proxy": "/tmp/proxy.sock.json"
 }
 ```
 
@@ -391,20 +392,22 @@ Notes:
 
 - Versioned for forward compatibility.
 - `key_ref` is required for HTTP transport sessions.
-- `key_ref` is omitted for Unix socket sessions.
+- `key_ref: null` means no bearer token is sent (or the field may be omitted).
+- `session_id: null` means stateless mode.
+- `proxy` points to the proxy sidecar file for Unix transport sessions.
 - Session file is the shared transport contract for `tool`/`resource`/`prompt`.
 
 ## Proxy Control File
 
-For a socket endpoint `unix:///path/to/stdio.sock`, proxy lifecycle metadata is stored
-in `/path/to/stdio.json`.
+For a socket endpoint `unix:///path/to/proxy.sock`, proxy lifecycle metadata is stored
+in `/path/to/proxy.sock.json`.
 
 Recommended control file schema:
 
 ```json
 {
   "version": 1,
-  "socket": "/path/to/stdio.sock",
+  "socket": "/path/to/proxy.sock",
   "pid": 12345,
   "command": "codex",
   "args": ["mcp-server"],
@@ -414,7 +417,7 @@ Recommended control file schema:
 ```
 
 `proxy down` reads this file, terminates the process, and removes both
-`stdio.sock` and `stdio.json`.
+`proxy.sock` and `proxy.sock.json`.
 
 ## Stdio Support via Unix Socket + Proxy
 
@@ -551,7 +554,7 @@ Implementation should remain small, with four main modules:
   - auth provider HTTP calls
 - `src/mcat_cli/proxy.py`
   - stdio bridge lifecycle (`up` / `down` / `status`)
-  - Unix socket control-file management (`stdio.json`)
+  - Unix socket sidecar-file management (`proxy.sock.json`)
 - `src/mcat_cli/mcp.py`
   - session initialization
   - resource listing/reading/template listing
