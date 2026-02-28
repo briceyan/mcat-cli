@@ -24,7 +24,7 @@ Design priorities:
 ## Command Surface (v1)
 
 ```bash
-mcat [GLOBAL_OPTS] auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE [--wait] [-o]
+mcat [GLOBAL_OPTS] auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE [--wait] [-o] [--client-id CLIENT_ID] [--client-secret CLIENT_SECRET] [--client-name CLIENT_NAME]
 mcat [GLOBAL_OPTS] auth continue --state AUTH_STATE_FILE -k KEY_REF [-o]
 
 mcat [GLOBAL_OPTS] init ENDPOINT -k KEY_REF -o SESS_INFO_FILE
@@ -55,6 +55,7 @@ Notes:
 - `-k / --key-ref` is required for `auth start` and `auth continue`.
 - `auth` defaults to non-blocking behavior; pass `--wait` to block/poll until completion.
 - `-o / --overwrite` allows replacing an existing `KEY_REF` value when persisting tokens.
+- `auth start` supports optional OAuth client overrides via `--client-id`, `--client-secret`, `--client-name`.
 
 ## JSON Output Contract
 
@@ -160,6 +161,14 @@ Auth-specific behavior:
 - if destination exists and `-o` is omitted, write fails with an explicit error
 - if destination is missing, write succeeds without `-o`
 - if destination exists and `-o` is provided, existing value is replaced
+
+OAuth client config behavior:
+
+- Optional static/dynamic OAuth client config may be provided in key-ref JSON under `_oauth_client`.
+- Supported `_oauth_client` fields: `client_id`, `client_secret`, `client_name`, `scope`, `resource`, `audience`.
+- Resolution precedence is: CLI override > `_oauth_client` > legacy top-level fields > defaults.
+- If resolved `client_id` exists, use static client mode and skip dynamic client registration.
+- If resolved `client_id` does not exist, attempt dynamic registration exactly once with resolved `client_name`.
 
 Constraints:
 
