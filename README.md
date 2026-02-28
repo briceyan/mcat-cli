@@ -71,6 +71,45 @@ For auth flows, token output is written back to `--key-ref`.
 - Missing destination is allowed (first-time auth).
 - Existing destination requires `-o/--overwrite`.
 
+## OAuth Client Config (Optional)
+
+`mcat auth start` accepts optional client configuration inputs:
+- `-c/--client path/to/client-info.json`
+- `--client-id`
+- `--client-secret`
+- `--client-name`
+
+Resolution order is deterministic:
+1. CLI overrides
+2. `--client` JSON file
+3. Built-in defaults
+
+If a resolved `client_id` exists, mcat uses static client mode and skips dynamic registration.
+If no `client_id` is resolved, mcat attempts dynamic registration once using resolved
+`client_name` (`--client-name` > `client.name` > default).
+
+`--key-ref` remains token storage only. Client config is not read from key-ref.
+
+Example client info files:
+
+```json
+{"name":"Codex"}
+```
+
+```json
+{
+  "id": "abc123",
+  "secret": "env://FIGMA_CLIENT_SECRET",
+  "scope": "mcp:connect",
+  "resource": "https://mcp.figma.com/mcp"
+}
+```
+
+Validation rules:
+- `name` conflicts with `id`/`secret`.
+- `--client-name` conflicts with `--client-id`/`--client-secret`.
+- `secret` (or `--client-secret`) requires `id` (or `--client-id`).
+
 ## Output Contract
 
 Most commands write compact JSON to stdout:

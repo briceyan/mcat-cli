@@ -49,6 +49,7 @@ LOGGER = logging.getLogger("mcat.auth")
 
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 DEFAULT_PUBLIC_CLIENT_ID = "mcat-cli"
+DEFAULT_DYNAMIC_CLIENT_NAME = "mcat-cli"
 AUTH_CODE_TIMEOUT_S = 300.0
 SENSITIVE_LOG_FIELDS = {
     "access_token",
@@ -74,6 +75,8 @@ class ClientConfig:
     audience: str | None
     resource: str | None
     use_dynamic_registration: bool
+    dynamic_client_name: str
+    dynamic_client_name_source: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +119,10 @@ def start_auth(
     state_file: str | None,
     wait: bool,
     overwrite: bool,
+    client_ref: str | None = None,
+    client_id_override: str | None = None,
+    client_secret_override: str | None = None,
+    client_name_override: str | None = None,
 ) -> dict[str, Any]:
     LOGGER.info("auth.start endpoint=%s wait=%s", endpoint, wait)
     endpoint = _normalize_url(endpoint, field="ENDPOINT")
@@ -123,7 +130,12 @@ def start_auth(
     if existing is not None:
         return existing
 
-    client_cfg = _load_client_config_from_key_ref(key_ref)
+    client_cfg = _resolve_client_config(
+        client_ref=client_ref,
+        client_id_override=client_id_override,
+        client_secret_override=client_secret_override,
+        client_name_override=client_name_override,
+    )
     oauth_meta = _discover_oauth_metadata(endpoint)
     selected_flow = _select_auth_flow(oauth_meta)
     _log_auth_capabilities(
@@ -200,7 +212,8 @@ def _log_auth_capabilities(
 
     LOGGER.info(
         "auth.discovery capabilities endpoint=%s issuer=%s flows=%s selected_flow=%s "
-        "dynamic_registration=%s registration_mode=%s challenged_scope=%s configured_scope=%s resource=%s",
+        "dynamic_registration=%s registration_mode=%s challenged_scope=%s configured_scope=%s resource=%s "
+        "dynamic_client_name=%s dynamic_client_name_source=%s",
         endpoint,
         _as_optional_str(oauth_meta.get("issuer")) or "-",
         ",".join(flows) if flows else "none",
@@ -210,6 +223,8 @@ def _log_auth_capabilities(
         _as_optional_str(oauth_meta.get("challenged_scope")) or "-",
         client_cfg.scope or "-",
         _as_optional_str(oauth_meta.get("resource")) or client_cfg.resource or "-",
+        client_cfg.dynamic_client_name or "-",
+        client_cfg.dynamic_client_name_source or "-",
     )
 
 
@@ -426,7 +441,6 @@ def _start_auth_authorization_code(
             oauth_meta=oauth_meta,
             client_cfg=client_cfg,
             redirect_uri=callback.redirect_uri,
-            key_ref=key_ref,
         )
 
         code_verifier = _generate_pkce_verifier()
@@ -757,7 +771,6 @@ def _resolve_client_for_authorization_code(
     oauth_meta: dict[str, str],
     client_cfg: ClientConfig,
     redirect_uri: str,
-    key_ref: str,
 ) -> dict[str, str]:
     registration_endpoint = _as_optional_str(oauth_meta.get("registration_endpoint"))
     if (
@@ -768,11 +781,15 @@ def _resolve_client_for_authorization_code(
             reg = _register_dynamic_client(
                 registration_endpoint=registration_endpoint,
                 redirect_uri=redirect_uri,
-                client_name="mcat-cli",
+                client_name=client_cfg.dynamic_client_name,
             )
         except HttpJsonError as exc:
             raise ValueError(
-                _dynamic_client_registration_error_message(exc=exc, key_ref=key_ref)
+                _dynamic_client_registration_error_message(
+                    exc=exc,
+                    client_name=client_cfg.dynamic_client_name,
+                    client_name_source=client_cfg.dynamic_client_name_source,
+                )
             ) from None
         client_id = _as_optional_str(reg.get("client_id"))
         if not client_id:
@@ -820,7 +837,10 @@ def _register_dynamic_client(
 
 
 def _dynamic_client_registration_error_message(
-    *, exc: HttpJsonError, key_ref: str
+    *,
+    exc: HttpJsonError,
+    client_name: str,
+    client_name_source: str,
 ) -> str:
     payload_obj = exc.payload if isinstance(exc.payload, dict) else {}
     provider_msg = _as_optional_str(
@@ -829,9 +849,10 @@ def _dynamic_client_registration_error_message(
     if exc.status in {401, 403}:
         detail = f": {provider_msg}" if provider_msg else ""
         return (
-            f"dynamic client registration rejected by server (HTTP {exc.status}){detail}; "
-            f"configure --key-ref {key_ref} with OAuth client fields "
-            '{"client_id":"...","client_secret":"..."} and retry auth start'
+            f'dynamic client registration rejected by server (HTTP {exc.status}) with '
+            f'client_name="{client_name}" (source={client_name_source}){detail}; '
+            "retry with --client-name NAME, or provide static credentials "
+            "via --client-id/--client-secret (or --client CLIENT_INFO_FILE)"
         )
     if provider_msg:
         return f"dynamic client registration failed: {provider_msg}"
@@ -1607,52 +1628,155 @@ def _parse_param_fragment(fragment: str) -> dict[str, str]:
     return out
 
 
-def _load_client_config_from_key_ref(key_ref_raw: str) -> ClientConfig:
-    try:
-        payload = _read_key_ref(key_ref_raw)
-    except KeyRefNotFoundError:
-        LOGGER.info("auth.client using default public client id (key ref missing)")
-        return _default_client_config()
+def _resolve_client_config(
+    *,
+    client_ref: str | None,
+    client_id_override: str | None,
+    client_secret_override: str | None,
+    client_name_override: str | None,
+) -> ClientConfig:
+    client_doc = _read_client_info_doc(client_ref)
 
-    if not isinstance(payload, dict):
-        # KEY_REF typically stores an access token; ignore and use the default public client.
-        LOGGER.info(
-            "auth.client using default public client id (no client config in key ref)"
+    cli_id = _as_optional_str(client_id_override)
+    cli_secret_spec = _as_optional_str(client_secret_override)
+    cli_name = _as_optional_str(client_name_override)
+
+    if cli_name and (cli_id or cli_secret_spec):
+        raise ValueError("--client-name conflicts with --client-id/--client-secret")
+
+    file_id = _extract_client_alias_string(client_doc, keys=("id", "client_id"))
+    file_secret_spec = _extract_client_alias_string(
+        client_doc, keys=("secret", "client_secret")
+    )
+    file_name = _extract_client_alias_string(client_doc, keys=("name", "client_name"))
+    file_scope = _coerce_scope_value(client_doc.get("scope", client_doc.get("scopes")))
+    file_audience = _extract_client_alias_string(client_doc, keys=("audience",))
+    file_resource = _extract_client_alias_string(client_doc, keys=("resource",))
+
+    if file_name and (file_id or file_secret_spec):
+        raise ValueError(
+            "client info file cannot combine name with id/client_id or secret/client_secret"
         )
-        return _default_client_config()
+    if file_secret_spec and not file_id:
+        raise ValueError("client info file secret/client_secret requires id/client_id")
 
-    client_id = _as_optional_str(payload.get("client_id"))
-    if not client_id:
-        LOGGER.info("auth.client using default public client id (client_id missing)")
-        return _default_client_config()
+    client_id = cli_id or file_id
+    client_secret_spec = cli_secret_spec or file_secret_spec
+    client_name = cli_name or file_name
 
-    scope_value = payload.get("scope", payload.get("scopes"))
-    scope: str | None = None
-    if isinstance(scope_value, list):
-        parts = [str(x).strip() for x in scope_value if str(x).strip()]
-        scope = " ".join(parts) if parts else None
-    elif isinstance(scope_value, str):
-        scope = scope_value.strip() or None
+    if client_name and (client_id or client_secret_spec):
+        raise ValueError("client config cannot combine name with id/client_secret")
+    if client_secret_spec and not client_id:
+        raise ValueError("--client-secret requires --client-id (or id in --client file)")
 
-    return ClientConfig(
-        client_id=client_id,
-        client_secret=_as_optional_str(payload.get("client_secret")),
-        scope=scope,
-        audience=_as_optional_str(payload.get("audience")),
-        resource=_as_optional_str(payload.get("resource")),
-        use_dynamic_registration=False,
+    client_secret: str | None = None
+    if client_secret_spec:
+        client_secret = _resolve_client_secret_spec(client_secret_spec)
+
+    if client_id:
+        LOGGER.info(
+            "auth.client using configured static client id source=%s",
+            "cli" if cli_id else "client_file",
+        )
+        return ClientConfig(
+            client_id=client_id,
+            client_secret=client_secret,
+            scope=file_scope,
+            audience=file_audience,
+            resource=file_resource,
+            use_dynamic_registration=False,
+            dynamic_client_name=DEFAULT_DYNAMIC_CLIENT_NAME,
+            dynamic_client_name_source="default",
+        )
+
+    dynamic_client_name = client_name or DEFAULT_DYNAMIC_CLIENT_NAME
+    dynamic_client_name_source = (
+        "cli" if cli_name else ("client_file" if file_name else "default")
+    )
+    LOGGER.info("auth.client using default public client id")
+    return _default_client_config(
+        scope=file_scope,
+        audience=file_audience,
+        resource=file_resource,
+        dynamic_client_name=dynamic_client_name,
+        dynamic_client_name_source=dynamic_client_name_source,
     )
 
 
-def _default_client_config() -> ClientConfig:
+def _default_client_config(
+    *,
+    scope: str | None = None,
+    audience: str | None = None,
+    resource: str | None = None,
+    dynamic_client_name: str = DEFAULT_DYNAMIC_CLIENT_NAME,
+    dynamic_client_name_source: str = "default",
+) -> ClientConfig:
     return ClientConfig(
         client_id=DEFAULT_PUBLIC_CLIENT_ID,
         client_secret=None,
-        scope=None,
-        audience=None,
-        resource=None,
+        scope=scope,
+        audience=audience,
+        resource=resource,
         use_dynamic_registration=True,
+        dynamic_client_name=dynamic_client_name,
+        dynamic_client_name_source=dynamic_client_name_source,
     )
+
+
+def _read_client_info_doc(client_ref: str | None) -> dict[str, Any]:
+    if not _as_optional_str(client_ref):
+        return {}
+    assert client_ref is not None
+    try:
+        payload = _read_key_ref(client_ref)
+    except KeyRefNotFoundError:
+        raise ValueError(f"client info file not found: {client_ref}") from None
+    if not isinstance(payload, dict):
+        raise ValueError("client info file must contain a JSON object")
+    return payload
+
+
+def _extract_client_alias_string(
+    payload: dict[str, Any], *, keys: tuple[str, ...]
+) -> str | None:
+    for key in keys:
+        value = _as_optional_str(payload.get(key))
+        if value:
+            return value
+    return None
+
+
+def _resolve_client_secret_spec(secret_spec: str) -> str:
+    if "://" not in secret_spec:
+        return secret_spec
+    try:
+        payload = _read_key_ref(secret_spec)
+    except KeyRefNotFoundError:
+        raise ValueError(f"client secret KEY_SPEC not found: {secret_spec}") from None
+    direct = _as_optional_str(payload)
+    if direct:
+        return direct
+    if isinstance(payload, dict):
+        extracted = (
+            _as_optional_str(payload.get("secret"))
+            or _as_optional_str(payload.get("client_secret"))
+            or _as_optional_str(payload.get("value"))
+        )
+        if extracted:
+            return extracted
+    raise ValueError(
+        f"client secret KEY_SPEC must resolve to a string "
+        f'or object with "secret"/"client_secret"/"value": {secret_spec}'
+    )
+
+
+def _coerce_scope_value(value: Any) -> str | None:
+    if isinstance(value, list):
+        parts = [str(x).strip() for x in value if str(x).strip()]
+        return " ".join(parts) if parts else None
+    if isinstance(value, str):
+        return value.strip() or None
+    return None
 
 
 def _require_state_file_for_pending(path: str | None) -> str:
