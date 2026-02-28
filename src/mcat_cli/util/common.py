@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from urllib import parse as urlparse
 
 import json5
@@ -19,6 +19,40 @@ def normalize_url(value: str, *, field: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         raise ValueError(f"{field} must be an absolute URL")
     return text
+
+
+def normalize_mcp_endpoint(
+    value: str, *, field: str
+) -> tuple[Literal["http", "unix"], str]:
+    text = value.strip()
+    parsed = urlparse.urlsplit(text)
+    scheme = parsed.scheme.lower()
+
+    if scheme in {"http", "https"}:
+        if not parsed.netloc:
+            raise ValueError(f"{field} must be an absolute URL")
+        return "http", text
+
+    if scheme != "unix":
+        raise ValueError(f"{field} must start with http://, https://, or unix:///")
+
+    if parsed.netloc:
+        raise ValueError(f"{field} unix endpoint must not include a host")
+    if parsed.query or parsed.fragment:
+        raise ValueError(f"{field} unix endpoint must not include query or fragment")
+    if not parsed.path or not parsed.path.startswith("/"):
+        raise ValueError(f"{field} unix endpoint must include an absolute socket path")
+
+    normalized = f"unix://{parsed.path}"
+    return "unix", normalized
+
+
+def unix_socket_path_from_endpoint(value: str, *, field: str) -> str:
+    transport, endpoint = normalize_mcp_endpoint(value, field=field)
+    if transport != "unix":
+        raise ValueError(f"{field} must be a unix:/// endpoint")
+    parsed = urlparse.urlsplit(endpoint)
+    return parsed.path
 
 
 def maybe_parse_json_scalar(text: str) -> Any:

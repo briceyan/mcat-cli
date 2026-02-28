@@ -26,8 +26,35 @@ class SessionInfoTest(unittest.TestCase):
         self.assertEqual(SessionInfo.from_doc(model.to_doc()), model)
 
     def test_session_info_validate_missing_endpoint(self) -> None:
-        with self.assertRaisesRegex(ValueError, "invalid session info file: missing endpoint"):
+        with self.assertRaisesRegex(
+            ValueError, "invalid session info file: missing endpoint"
+        ):
             SessionInfo.from_doc({"version": 1, "key_ref": "json://token.json"})
+
+    def test_session_info_validate_http_requires_key_ref(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "invalid session info file: missing key_ref"
+        ):
+            SessionInfo.from_doc(
+                {
+                    "version": 1,
+                    "transport": "http",
+                    "endpoint": "https://example.com/mcp",
+                }
+            )
+
+    def test_session_info_validate_unix_allows_missing_key_ref(self) -> None:
+        model = SessionInfo.from_doc(
+            {
+                "version": 1,
+                "transport": "unix",
+                "endpoint": "unix:///tmp/proxy.sock",
+                "session_id": None,
+                "proxy": "/tmp/proxy.sock.json",
+            }
+        )
+        self.assertEqual(model.transport, "unix")
+        self.assertIsNone(model.key_ref)
 
     def test_write_then_read_session_info(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

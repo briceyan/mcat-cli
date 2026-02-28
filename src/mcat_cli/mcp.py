@@ -4,6 +4,7 @@ import base64
 import binascii
 import json
 import logging
+import socket
 from pathlib import Path
 from typing import Any
 from urllib import error as urlerror
@@ -14,7 +15,7 @@ from .util.common import (
     as_optional_str as _as_optional_str,
 )
 from .util.common import (
-    normalize_url as _normalize_url,
+    normalize_mcp_endpoint as _normalize_mcp_endpoint,
 )
 from .util.key_ref import (
     normalize_key_ref as _normalize_key_ref,
@@ -32,14 +33,24 @@ from .util.session_info import (
 LOGGER = logging.getLogger("mcat.mcp")
 
 
-def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[str, Any]:
+def init_session(
+    *, endpoint: str, key_ref: str | None, sess_info_file: str
+) -> dict[str, Any]:
     LOGGER.info("mcp.init requested endpoint=%s", endpoint)
-    normalized_endpoint = _normalize_url(endpoint, field="ENDPOINT")
-    normalized_key_ref = _normalize_key_ref(key_ref)
+    transport, normalized_endpoint = _normalize_mcp_endpoint(endpoint, field="ENDPOINT")
+    normalized_key_ref: str | None = None
     if not sess_info_file.strip():
         raise ValueError("SESS_INFO_FILE is required")
 
-    token = _resolve_access_token_from_key_ref(normalized_key_ref)
+    token: str | None = None
+    if transport == "http":
+        if key_ref is None or not key_ref.strip():
+            raise ValueError("-k / --key-ref is required for HTTP(S) endpoint")
+        normalized_key_ref = _normalize_key_ref(key_ref)
+        token = _resolve_access_token_from_key_ref(normalized_key_ref)
+    elif key_ref is not None and key_ref.strip():
+        raise ValueError("-k / --key-ref is not supported for unix endpoints")
+
     init_payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -79,11 +90,14 @@ def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[st
 
     session_doc = {
         "version": 1,
+        "transport": transport,
         "session_id": session_id,
         "session_mode": "stateless" if stateless else "stateful",
         "key_ref": normalized_key_ref,
         "endpoint": normalized_endpoint,
     }
+    if transport == "unix":
+        session_doc["proxy"] = _default_proxy_path(normalized_endpoint)
     if isinstance(init_result, dict):
         protocol_version = _as_optional_str(init_result.get("protocolVersion"))
         if protocol_version:
@@ -94,10 +108,13 @@ def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[st
     _write_session_info(sess_info_file, session_doc)
     result: dict[str, Any] = {
         "session_file": str(Path(sess_info_file)),
+        "transport": transport,
         "session_mode": session_doc["session_mode"],
     }
     if session_doc["session_id"]:
         result["session_id"] = session_doc["session_id"]
+    if transport == "unix":
+        result["proxy"] = session_doc["proxy"]
     return result
 
 
@@ -328,14 +345,18 @@ def _invoke_session_method(
 
 def _load_active_session(
     sess_info_file: str,
-) -> tuple[dict[str, Any], str, str, str | None]:
+) -> tuple[dict[str, Any], str, str | None, str | None]:
     session_doc = _read_session_info(sess_info_file)
-    endpoint = _normalize_url(
-        _require_str(session_doc.get("endpoint"), "endpoint"),
-        field="endpoint",
-    )
-    key_ref = _normalize_key_ref(_require_str(session_doc.get("key_ref"), "key_ref"))
-    token = _resolve_access_token_from_key_ref(key_ref)
+    endpoint_value = _require_str(session_doc.get("endpoint"), "endpoint")
+    transport, endpoint = _normalize_mcp_endpoint(endpoint_value, field="endpoint")
+    configured_transport = _as_optional_str(session_doc.get("transport"))
+    if configured_transport and configured_transport != transport:
+        raise ValueError("invalid session info file: transport does not match endpoint")
+
+    token: str | None = None
+    if transport == "http":
+        key_ref = _normalize_key_ref(_require_str(session_doc.get("key_ref"), "key_ref"))
+        token = _resolve_access_token_from_key_ref(key_ref)
     session_id = _as_optional_str(session_doc.get("session_id"))
     return session_doc, endpoint, token, session_id
 
@@ -475,6 +496,24 @@ def _extract_jsonrpc_error_message(messages: list[dict[str, Any]]) -> str | None
 
 def _post_jsonrpc(
     endpoint: str,
+    token: str | None,
+    payload: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    transport, _ = _normalize_mcp_endpoint(endpoint, field="endpoint")
+    if transport == "unix":
+        return _post_jsonrpc_unix(endpoint, payload, session_id=session_id)
+    return _post_jsonrpc_http(
+        endpoint,
+        token or "",
+        payload,
+        session_id=session_id,
+    )
+
+
+def _post_jsonrpc_http(
+    endpoint: str,
     token: str,
     payload: dict[str, Any],
     *,
@@ -518,6 +557,86 @@ def _post_jsonrpc(
     LOGGER.info("mcp.http POST %s method=%s -> %s", endpoint, method, status)
     messages = _parse_mcp_response(body, content_type)
     return {"headers": response_headers, "messages": messages}
+
+
+def _post_jsonrpc_unix(
+    endpoint: str,
+    payload: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    socket_path = _socket_path_from_unix_endpoint(endpoint)
+    method = _as_optional_str(payload.get("method")) or "<unknown>"
+    LOGGER.info("mcp.unix POST %s method=%s", endpoint, method)
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+    request_lines = [
+        "POST / HTTP/1.1",
+        "Host: localhost",
+        "Accept: application/json, text/event-stream",
+        "Content-Type: application/json",
+        "User-Agent: mcat-cli/0.1",
+        f"Content-Length: {len(body)}",
+        "Connection: close",
+    ]
+    if session_id:
+        request_lines.append(f"Mcp-Session-Id: {session_id}")
+    wire = ("\r\n".join(request_lines) + "\r\n\r\n").encode("ascii") + body
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(60.0)
+            conn.connect(socket_path)
+            conn.sendall(wire)
+            chunks: list[bytes] = []
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except OSError as exc:
+        raise ValueError(f"network error contacting {endpoint}: {exc}") from None
+
+    raw = b"".join(chunks)
+    status, response_headers, response_body = _parse_http_response(raw)
+    body_text = response_body.decode("utf-8", errors="replace")
+
+    LOGGER.info("mcp.unix POST %s method=%s -> %s", endpoint, method, status)
+    if status >= 400:
+        msg = _extract_http_error_message(body_text)
+        if msg:
+            raise ValueError(f"mcp request failed ({status}): {msg}")
+        raise ValueError(f"mcp request failed ({status})")
+
+    messages = _parse_mcp_response(body_text, response_headers.get("content-type"))
+    return {"headers": response_headers, "messages": messages}
+
+
+def _parse_http_response(raw: bytes) -> tuple[int, dict[str, str], bytes]:
+    head, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        raise ValueError("invalid HTTP response from unix endpoint")
+
+    lines = head.split(b"\r\n")
+    if not lines:
+        raise ValueError("invalid HTTP response from unix endpoint")
+
+    status_line = lines[0].decode("ascii", errors="replace")
+    parts = status_line.split(" ", 2)
+    if len(parts) < 2 or not parts[1].isdigit():
+        raise ValueError("invalid HTTP status from unix endpoint")
+    status = int(parts[1])
+
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if b":" not in line:
+            continue
+        key, value = line.split(b":", 1)
+        headers[key.decode("ascii", errors="replace").strip().lower()] = (
+            value.decode("utf-8", errors="replace").strip()
+        )
+    return status, headers, body
 
 
 def _parse_mcp_response(text: str, content_type: str | None) -> list[dict[str, Any]]:
@@ -616,6 +735,19 @@ def _extract_tools(messages: list[dict[str, Any]]) -> list[dict[str, Any]] | Non
 
 def _resolve_access_token_from_key_ref(key_ref: str) -> str:
     return _read_web_token(key_ref).access_token
+
+
+def _socket_path_from_unix_endpoint(endpoint: str) -> str:
+    transport, normalized = _normalize_mcp_endpoint(endpoint, field="endpoint")
+    if transport != "unix":
+        raise ValueError("endpoint must be unix:/// for local transport")
+    # endpoint is normalized as unix:///absolute/path by normalize_mcp_endpoint.
+    return normalized.removeprefix("unix://")
+
+
+def _default_proxy_path(endpoint: str) -> str:
+    socket_path = _socket_path_from_unix_endpoint(endpoint)
+    return f"{socket_path}.json"
 
 
 def _require_str(value: Any, field: str) -> str:

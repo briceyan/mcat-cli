@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from urllib import parse as urlparse
 
 import json5
 from dataclasses_json import Undefined, dataclass_json
@@ -15,10 +16,12 @@ from .common import as_optional_str
 @dataclass(frozen=True, slots=True)
 class SessionInfo:
     version: int | None = None
+    transport: str | None = None
     endpoint: str | None = None
     key_ref: str | None = None
     session_id: str | None = None
     session_mode: str | None = None
+    proxy: str | None = None
     protocol_version: str | None = None
     server_capabilities: dict[str, Any] | None = None
 
@@ -34,16 +37,31 @@ class SessionInfo:
     def validate(self) -> None:
         if not isinstance(self.version, int):
             raise ValueError("invalid session info file: missing version")
-        if not as_optional_str(self.endpoint):
+        endpoint = as_optional_str(self.endpoint)
+        if not endpoint:
             raise ValueError("invalid session info file: missing endpoint")
-        if not as_optional_str(self.key_ref):
+        transport = as_optional_str(self.transport) or _infer_transport(endpoint)
+        if transport not in {"http", "unix"}:
+            raise ValueError("invalid session info file: unsupported transport")
+        if transport == "http" and not as_optional_str(self.key_ref):
             raise ValueError("invalid session info file: missing key_ref")
+        if self.proxy is not None and not as_optional_str(self.proxy):
+            raise ValueError("invalid session info file: proxy must be a string")
         if self.server_capabilities is not None and not isinstance(
             self.server_capabilities, dict
         ):
             raise ValueError(
                 "invalid session info file: server_capabilities must be an object"
             )
+
+
+def _infer_transport(endpoint: str) -> str:
+    scheme = urlparse.urlsplit(endpoint).scheme.lower()
+    if scheme in {"http", "https"}:
+        return "http"
+    if scheme == "unix":
+        return "unix"
+    raise ValueError("invalid session info file: unsupported endpoint scheme")
 
 
 def read_session_info_model(path: str) -> SessionInfo:
