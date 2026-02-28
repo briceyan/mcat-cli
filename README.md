@@ -73,35 +73,42 @@ For auth flows, token output is written back to `--key-ref`.
 
 ## OAuth Client Config (Optional)
 
-`mcat auth start` accepts optional client overrides:
+`mcat auth start` accepts optional client configuration inputs:
+- `-c/--client path/to/client-info.json`
 - `--client-id`
 - `--client-secret`
 - `--client-name`
 
 Resolution order is deterministic:
 1. CLI overrides
-2. `--key-ref` JSON `_oauth_client` block
-3. Legacy top-level JSON fields (backward compatibility)
-4. Built-in defaults
+2. `--client` JSON file
+3. Built-in defaults
 
 If a resolved `client_id` exists, mcat uses static client mode and skips dynamic registration.
 If no `client_id` is resolved, mcat attempts dynamic registration once using resolved
-`client_name` (`--client-name` > `_oauth_client.client_name` > default).
+`client_name` (`--client-name` > `client.name` > default).
 
-Example key-ref JSON:
+`--key-ref` remains token storage only. Client config is not read from key-ref.
+
+Example client info files:
+
+```json
+{"name":"Codex"}
+```
 
 ```json
 {
-  "access_token": "...",
-  "_oauth_client": {
-    "client_id": "...",
-    "client_secret": "...",
-    "client_name": "Codex",
-    "scope": "mcp:connect",
-    "resource": "https://mcp.figma.com/mcp"
-  }
+  "id": "abc123",
+  "secret": "env://FIGMA_CLIENT_SECRET",
+  "scope": "mcp:connect",
+  "resource": "https://mcp.figma.com/mcp"
 }
 ```
+
+Validation rules:
+- `name` conflicts with `id`/`secret`.
+- `--client-name` conflicts with `--client-id`/`--client-secret`.
+- `secret` (or `--client-secret`) requires `id` (or `--client-id`).
 
 ## Output Contract
 

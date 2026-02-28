@@ -62,20 +62,29 @@ AuthStateFileOpt = Annotated[
     str,
     typer.Option("--state", metavar="AUTH_STATE_FILE", help="Path to auth state file."),
 ]
+AuthClientRefOpt = Annotated[
+    str | None,
+    typer.Option(
+        "-c",
+        "--client",
+        metavar="CLIENT_INFO_FILE",
+        help="Path to OAuth client info JSON file.",
+    ),
+]
 AuthClientIdOpt = Annotated[
     str | None,
     typer.Option(
         "--client-id",
-        metavar="CLIENT_ID",
-        help="OAuth client_id override (uses static client mode).",
+        metavar="ID",
+        help="OAuth client id override (static client mode).",
     ),
 ]
 AuthClientSecretOpt = Annotated[
     str | None,
     typer.Option(
         "--client-secret",
-        metavar="CLIENT_SECRET",
-        help="OAuth client_secret override (requires a client_id).",
+        metavar="KEY_SPEC",
+        help="OAuth client secret override (KEY_SPEC or literal; requires client id).",
     ),
 ]
 AuthClientNameOpt = Annotated[
@@ -156,6 +165,7 @@ def auth_start(
     endpoint: EndpointArg,
     key_ref: KeyRefOpt,
     state_file: AuthStateFileOpt,
+    client: AuthClientRefOpt = None,
     client_id: AuthClientIdOpt = None,
     client_secret: AuthClientSecretOpt = None,
     client_name: AuthClientNameOpt = None,
@@ -172,6 +182,7 @@ def auth_start(
             state_file=state_file,
             wait=wait,
             overwrite=overwrite,
+            client_ref=client,
             client_id_override=client_id,
             client_secret_override=client_secret,
             client_name_override=client_name,
