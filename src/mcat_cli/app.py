@@ -6,7 +6,9 @@ import sys
 from dataclasses import dataclass
 from typing import Annotated, Any, Callable
 
+import click
 import typer
+from typer.core import TyperCommand, TyperGroup
 
 from . import auth as auth_mod
 from . import mcp as mcp_mod
@@ -156,10 +158,37 @@ class GlobalOpts:
     log_file: str | None
 
 
+class HelpOnMissingParamsCommand(TyperCommand):
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        try:
+            return super().parse_args(ctx, args)
+        except click.MissingParameter:
+            # For discoverability, show command usage/help instead of a hard error block.
+            click.echo(ctx.get_help(), color=ctx.color)
+            raise click.exceptions.Exit(0) from None
+
+
+class McatTopLevelGroup(TyperGroup):
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        commands = list(super().list_commands(ctx))
+        if not commands:
+            return commands
+        preferred_order = {"auth": 0, "init": 1}
+        existing_index = {name: idx for idx, name in enumerate(commands)}
+        commands.sort(
+            key=lambda name: (preferred_order.get(name, 2), existing_index[name])
+        )
+        return commands
+
+
 auth_cmd = typer.Typer()
 
 
-@auth_cmd.command("start", help="Start an OAuth authorization flow.")
+@auth_cmd.command(
+    "start",
+    help="Start an OAuth authorization flow.",
+    cls=HelpOnMissingParamsCommand,
+)
 def auth_start(
     ctx: typer.Context,
     endpoint: EndpointArg,
@@ -190,7 +219,11 @@ def auth_start(
     )
 
 
-@auth_cmd.command("continue", help="Continue a pending OAuth authorization flow.")
+@auth_cmd.command(
+    "continue",
+    help="Continue a pending OAuth authorization flow.",
+    cls=HelpOnMissingParamsCommand,
+)
 def auth_continue(
     ctx: typer.Context,
     state_file: AuthStateFileOpt,
@@ -224,7 +257,11 @@ def init_default(
 resource_cmd = typer.Typer()
 
 
-@resource_cmd.command("list", help="List resources available.")
+@resource_cmd.command(
+    "list",
+    help="List resources available.",
+    cls=HelpOnMissingParamsCommand,
+)
 def resource_list(
     ctx: typer.Context,
     sess_info_file: SessionInfoFileOpt,
@@ -242,6 +279,7 @@ def resource_list(
 @resource_cmd.command(
     "list-template",
     help="List resource templates available.",
+    cls=HelpOnMissingParamsCommand,
 )
 def resource_list_template(
     ctx: typer.Context,
@@ -257,7 +295,11 @@ def resource_list_template(
     )
 
 
-@resource_cmd.command("read", help="Read a resource by URI.")
+@resource_cmd.command(
+    "read",
+    help="Read a resource by URI.",
+    cls=HelpOnMissingParamsCommand,
+)
 def resource_read(
     ctx: typer.Context,
     uri: ResourceUriArg,
@@ -295,7 +337,7 @@ def resource_read(
 tool_cmd = typer.Typer()
 
 
-@tool_cmd.command("list", help="List tools available.")
+@tool_cmd.command("list", help="List tools available.", cls=HelpOnMissingParamsCommand)
 def tool_list(
     ctx: typer.Context,
     sess_info_file: SessionInfoFileOpt,
@@ -304,7 +346,7 @@ def tool_list(
     _run_json_command(lambda: mcp_mod.list_tools(sess_info_file=sess_info_file))
 
 
-@tool_cmd.command("call", help="Call a specific tool.")
+@tool_cmd.command("call", help="Call a specific tool.", cls=HelpOnMissingParamsCommand)
 def tool_call(
     ctx: typer.Context,
     tool_name: ToolNameArg,
@@ -322,7 +364,11 @@ def tool_call(
 prompt_cmd = typer.Typer()
 
 
-@prompt_cmd.command("list", help="List prompts available.")
+@prompt_cmd.command(
+    "list",
+    help="List prompts available.",
+    cls=HelpOnMissingParamsCommand,
+)
 def prompt_list(
     ctx: typer.Context,
     sess_info_file: SessionInfoFileOpt,
@@ -337,7 +383,7 @@ def prompt_list(
     )
 
 
-@prompt_cmd.command("get", help="Get a prompt by name.")
+@prompt_cmd.command("get", help="Get a prompt by name.", cls=HelpOnMissingParamsCommand)
 def prompt_get(
     ctx: typer.Context,
     prompt_name: PromptNameArg,
@@ -376,12 +422,17 @@ def parse_global_opts(
 
 conf: dict[str, Any] = {"no_args_is_help": True}
 app = typer.Typer(
+    cls=McatTopLevelGroup,
     help="The model-context access tool for agents and humans.",
     callback=parse_global_opts,
     **conf,
 )
 app.add_typer(auth_cmd, name="auth", help="Authorize MCP server access.", **conf)
-app.command("init", help="Initialize MCP sessions.")(init_default)
+app.command(
+    "init",
+    help="Initialize MCP sessions.",
+    cls=HelpOnMissingParamsCommand,
+)(init_default)
 app.add_typer(tool_cmd, name="tool", help="Use MCP tools.", **conf)
 app.add_typer(resource_cmd, name="resource", help="Use MCP resources.", **conf)
 app.add_typer(prompt_cmd, name="prompt", help="Use MCP prompts.", **conf)
