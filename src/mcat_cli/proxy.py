@@ -15,9 +15,8 @@ from typing import Any
 from urllib import parse as urlparse
 
 import json5
-from fastmcp import Client
 from fastmcp.client.transports.stdio import StdioTransport
-from fastmcp.server import create_proxy
+from fastmcp.server.providers.proxy import FastMCPProxy, StatefulProxyClient
 
 from .util.atomic_files import write_json_object_locked
 
@@ -146,8 +145,13 @@ def run_proxy_server(*, endpoint: str, command: list[str]) -> None:
         args=resolved_command[1:],
         keep_alive=True,
     )
-    client = Client(transport)
-    proxy = create_proxy(client, name="mcat-fastmcp-proxy")
+    # Reuse one upstream stdio client across requests so the subprocess session
+    # is initialized once and stays stable for subsequent tool resolution/calls.
+    shared_client = StatefulProxyClient(transport=transport)
+    proxy = FastMCPProxy(
+        client_factory=lambda: shared_client,
+        name="mcat-fastmcp-proxy",
+    )
     proxy.run(
         transport="http",
         host=host,

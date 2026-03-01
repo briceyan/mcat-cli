@@ -56,6 +56,13 @@ class ProxyFastMcpTest(unittest.TestCase):
 
                 tools = mcp.list_tools(sess_info_file=str(sess_file))
                 self.assertIsInstance(tools.get("tools"), list)
+                call = mcp.call_tool(
+                    tool_name="ping",
+                    arguments={},
+                    sess_info_file=str(sess_file),
+                )
+                self.assertEqual(call.get("content"), [{"type": "text", "text": "pong"}])
+                self.assertFalse(call.get("isError", False))
             finally:
                 down = proxy.proxy_down(endpoint=endpoint)
                 self.assertFalse(Path(up["proxy"]).exists())
@@ -64,33 +71,90 @@ class ProxyFastMcpTest(unittest.TestCase):
 
 
 def _stub_server_source() -> str:
-    return (
-        "import json\\n"
-        "import sys\\n"
-        "\\n"
-        "def emit(payload):\\n"
-        "    sys.stdout.write(json.dumps(payload, separators=(\\\",\\\", \\\":\\\")))\\n"
-        "    sys.stdout.write('\\\\n')\\n"
-        "    sys.stdout.flush()\\n"
-        "\\n"
-        "for line in sys.stdin:\\n"
-        "    line = line.strip()\\n"
-        "    if not line:\\n"
-        "        continue\\n"
-        "    req = json.loads(line)\\n"
-        "    method = req.get('method')\\n"
-        "    req_id = req.get('id')\\n"
-        "    if method == 'initialize':\\n"
-        "        emit({'jsonrpc':'2.0','id':req_id,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}}}})\\n"
-        "        continue\\n"
-        "    if method == 'notifications/initialized':\\n"
-        "        continue\\n"
-        "    if method == 'tools/list':\\n"
-        "        emit({'jsonrpc':'2.0','id':req_id,'result':{'tools':[{'name':'ping','inputSchema':{}}]}})\\n"
-        "        continue\\n"
-        "    if req_id is not None:\\n"
-        "        emit({'jsonrpc':'2.0','id':req_id,'result':{}})\\n"
-    )
+    return """import json
+import sys
+
+initialized = False
+
+
+def emit(payload):
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")))
+    sys.stdout.write("\\n")
+    sys.stdout.flush()
+
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method")
+    req_id = req.get("id")
+    if method == "initialize":
+        if initialized:
+            emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32600,
+                        "message": "initialize called more than once",
+                    },
+                }
+            )
+            continue
+        initialized = True
+        emit(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "stub", "version": "0.0.0"},
+                },
+            }
+        )
+        continue
+    if method == "notifications/initialized":
+        continue
+    if method == "tools/list":
+        emit(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"tools": [{"name": "ping", "inputSchema": {}}]},
+            }
+        )
+        continue
+    if method == "tools/call":
+        params = req.get("params") or {}
+        if params.get("name") == "ping":
+            emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [{"type": "text", "text": "pong"}],
+                        "isError": False,
+                    },
+                }
+            )
+            continue
+        emit(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": "Unknown tool"}],
+                    "isError": True,
+                },
+            }
+        )
+        continue
+    if req_id is not None:
+        emit({"jsonrpc": "2.0", "id": req_id, "result": {}})
+"""
 
 
 if __name__ == "__main__":
