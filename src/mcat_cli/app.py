@@ -14,6 +14,7 @@ from typer.core import TyperCommand, TyperGroup
 
 from . import auth as auth_mod
 from . import mcp as mcp_mod
+from . import proxy as proxy_mod
 from .util.logging import configure_logging, parse_log_specs
 
 APP_LOGGER = logging.getLogger("mcat.app")
@@ -23,7 +24,7 @@ LogSpecsOpt = Annotated[
     list[str] | None,
     typer.Option(
         "--log",
-        help="Enable logs by domain (`app`, `auth`, `mcp`) optionally with `:LEVEL`.",
+        help="Enable logs by domain (`app`, `auth`, `proxy`, `mcp`) optionally with `:LEVEL`.",
     ),
 ]
 LogStderrOpt = Annotated[
@@ -51,6 +52,15 @@ KeyRefOpt = Annotated[
     str,
     typer.Option(
         "-k", "--key-ref", metavar="KEY_REF", help="Where to read key/token from."
+    ),
+]
+InitKeyRefOpt = Annotated[
+    str | None,
+    typer.Option(
+        "-k",
+        "--key-ref",
+        metavar="KEY_REF",
+        help="Where to read key/token from (optional for unauthenticated HTTP endpoints).",
     ),
 ]
 KeyRefOverwriteOpt = Annotated[
@@ -151,6 +161,28 @@ ResourceOutOpt = Annotated[
         help="Write resource content to FILE(`-` to stdout).",
     ),
 ]
+ProxyEndpointArg = Annotated[
+    str,
+    typer.Argument(
+        ...,
+        metavar="ENDPOINT",
+        help="Local HTTP endpoint for internal proxy server command.",
+    ),
+]
+ProxyPortArg = Annotated[
+    int | None,
+    typer.Argument(
+        metavar="PORT",
+        help=f"Local proxy port (default: {proxy_mod.DEFAULT_PROXY_PORT}).",
+    ),
+]
+ProxyUpPortArg = Annotated[
+    str | None,
+    typer.Argument(
+        metavar="PORT",
+        help="Local proxy port (optional). If omitted, mcat picks an available port.",
+    ),
+]
 
 
 @dataclass(slots=True)
@@ -165,7 +197,6 @@ class HelpOnMissingParamsCommand(TyperCommand):
         try:
             return super().parse_args(ctx, args)
         except click.MissingParameter:
-            # For discoverability, show command usage/help instead of a hard error block.
             click.echo(ctx.get_help(), color=ctx.color)
             raise click.exceptions.Exit(0) from None
 
@@ -245,8 +276,8 @@ def auth_continue(
 def init_default(
     ctx: typer.Context,
     endpoint: EndpointArg,
-    key_ref: KeyRefOpt,
     sess_info_file: SessionInfoOutOpt,
+    key_ref: InitKeyRefOpt = None,
 ) -> None:
     _ = _runtime(ctx)
     _run_json_command(
@@ -254,6 +285,77 @@ def init_default(
             endpoint=endpoint, key_ref=key_ref, sess_info_file=sess_info_file
         )
     )
+
+
+proxy_cmd = typer.Typer()
+
+
+@proxy_cmd.command(
+    "up",
+    help="Start a proxy. Pass command after `--` (example: mcat proxy up 6010 -- codex mcp-server).",
+    cls=HelpOnMissingParamsCommand,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def proxy_up(
+    ctx: typer.Context,
+    port: ProxyUpPortArg = None,
+) -> None:
+    _ = _runtime(ctx)
+    resolved_port, command = _parse_proxy_up_inputs(port, ctx.args)
+    _run_json_command(
+        lambda: proxy_mod.proxy_up(
+            port=resolved_port,
+            command=command,
+        )
+    )
+
+
+@proxy_cmd.command(
+    "down",
+    help="Stop a proxy.",
+    cls=HelpOnMissingParamsCommand,
+)
+def proxy_down(
+    ctx: typer.Context,
+    port: ProxyPortArg = None,
+) -> None:
+    _ = _runtime(ctx)
+    _run_json_command(
+        lambda: proxy_mod.proxy_down(port=port or proxy_mod.DEFAULT_PROXY_PORT)
+    )
+
+
+@proxy_cmd.command(
+    "status",
+    help="Show status for a proxy.",
+    cls=HelpOnMissingParamsCommand,
+)
+def proxy_status(
+    ctx: typer.Context,
+    port: ProxyPortArg = None,
+) -> None:
+    _ = _runtime(ctx)
+    _run_json_command(
+        lambda: proxy_mod.proxy_status(port=port or proxy_mod.DEFAULT_PROXY_PORT)
+    )
+
+
+@proxy_cmd.command(
+    "_serve",
+    hidden=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def proxy_serve(
+    ctx: typer.Context,
+    endpoint: ProxyEndpointArg,
+) -> None:
+    _ = _runtime(ctx)
+    command = _parse_passthrough_command(ctx.args)
+    try:
+        proxy_mod.run_proxy_server(endpoint=endpoint, command=command)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
 
 
 resource_cmd = typer.Typer()
@@ -437,6 +539,7 @@ app.command(
     help="Initialize MCP sessions.",
     cls=HelpOnMissingParamsCommand,
 )(init_default)
+app.add_typer(proxy_cmd, name="proxy", help="Translate stdio to HTTP.", **conf)
 app.add_typer(tool_cmd, name="tool", help="Use MCP tools.", **conf)
 app.add_typer(resource_cmd, name="resource", help="Use MCP resources.", **conf)
 app.add_typer(prompt_cmd, name="prompt", help="Use MCP prompts.", **conf)
@@ -532,6 +635,45 @@ def _parse_prompt_arguments(args_input: str | None) -> dict[str, str] | None:
             raise ValueError("ARGS for prompts/get must be a JSON object of strings")
         arguments[key] = value
     return arguments
+
+
+def _parse_passthrough_command(extra_args: list[str]) -> list[str]:
+    args = list(extra_args)
+    if args and args[0] == "--":
+        args = args[1:]
+    if not args:
+        raise ValueError(
+            "missing command after -- (example: mcat proxy up 6010 -- codex mcp-server)"
+        )
+    return args
+
+
+def _parse_proxy_up_inputs(
+    port_hint: str | None, extra_args: list[str]
+) -> tuple[int | None, list[str]]:
+    args = list(extra_args)
+    if args and args[0] == "--":
+        args = args[1:]
+
+    if port_hint is None:
+        command = args
+        resolved_port: int | None = None
+    else:
+        text = port_hint.strip()
+        if text.isdigit():
+            resolved_port = int(text)
+            command = args
+        else:
+            resolved_port = None
+            command = [port_hint, *args]
+
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise ValueError(
+            "missing command after -- (example: mcat proxy up 6010 -- codex mcp-server)"
+        )
+    return resolved_port, command
 
 
 def _runtime(ctx: typer.Context) -> GlobalOpts:

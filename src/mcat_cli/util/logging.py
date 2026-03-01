@@ -6,6 +6,7 @@ from typing import Mapping
 LOG_DOMAINS = {
     "app": "mcat.app",
     "auth": "mcat.auth",
+    "proxy": "mcat.proxy",
     "mcp": "mcat.mcp",
 }
 

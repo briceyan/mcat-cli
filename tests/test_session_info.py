@@ -26,8 +26,20 @@ class SessionInfoTest(unittest.TestCase):
         self.assertEqual(SessionInfo.from_doc(model.to_doc()), model)
 
     def test_session_info_validate_missing_endpoint(self) -> None:
-        with self.assertRaisesRegex(ValueError, "invalid session info file: missing endpoint"):
+        with self.assertRaisesRegex(
+            ValueError, "invalid session info file: missing endpoint"
+        ):
             SessionInfo.from_doc({"version": 1, "key_ref": "json://token.json"})
+
+    def test_session_info_allows_missing_key_ref(self) -> None:
+        model = SessionInfo.from_doc(
+            {
+                "version": 1,
+                "endpoint": "http://127.0.0.1:8080/mcp",
+                "session_mode": "stateless",
+            }
+        )
+        self.assertIsNone(model.key_ref)
 
     def test_write_then_read_session_info(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
