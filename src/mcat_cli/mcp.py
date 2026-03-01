@@ -32,14 +32,19 @@ from .util.session_info import (
 LOGGER = logging.getLogger("mcat.mcp")
 
 
-def init_session(*, endpoint: str, key_ref: str, sess_info_file: str) -> dict[str, Any]:
+def init_session(
+    *, endpoint: str, key_ref: str | None, sess_info_file: str
+) -> dict[str, Any]:
     LOGGER.info("mcp.init requested endpoint=%s", endpoint)
     normalized_endpoint = _normalize_url(endpoint, field="ENDPOINT")
-    normalized_key_ref = _normalize_key_ref(key_ref)
+    normalized_key_ref: str | None = None
     if not sess_info_file.strip():
         raise ValueError("SESS_INFO_FILE is required")
 
-    token = _resolve_access_token_from_key_ref(normalized_key_ref)
+    token = ""
+    if key_ref is not None and key_ref.strip():
+        normalized_key_ref = _normalize_key_ref(key_ref)
+        token = _resolve_access_token_from_key_ref(normalized_key_ref)
     init_payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -334,8 +339,11 @@ def _load_active_session(
         _require_str(session_doc.get("endpoint"), "endpoint"),
         field="endpoint",
     )
-    key_ref = _normalize_key_ref(_require_str(session_doc.get("key_ref"), "key_ref"))
-    token = _resolve_access_token_from_key_ref(key_ref)
+    key_ref = _as_optional_str(session_doc.get("key_ref"))
+    token = ""
+    if key_ref:
+        normalized_key_ref = _normalize_key_ref(key_ref)
+        token = _resolve_access_token_from_key_ref(normalized_key_ref)
     session_id = _as_optional_str(session_doc.get("session_id"))
     return session_doc, endpoint, token, session_id
 

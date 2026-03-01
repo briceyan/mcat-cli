@@ -36,8 +36,6 @@ class SessionInfo:
             raise ValueError("invalid session info file: missing version")
         if not as_optional_str(self.endpoint):
             raise ValueError("invalid session info file: missing endpoint")
-        if not as_optional_str(self.key_ref):
-            raise ValueError("invalid session info file: missing key_ref")
         if self.server_capabilities is not None and not isinstance(
             self.server_capabilities, dict
         ):

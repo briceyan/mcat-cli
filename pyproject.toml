@@ -15,6 +15,7 @@ keywords = [
 requires-python = ">=3.11"
 dependencies = [
     "dataclasses-json>=0.6,<1.0",
+    "fastmcp>=3.0,<4.0",
     "json5>=0.12,<1.0",
     "python-dotenv>=1.0,<2.0",
     "typer>=0.12,<1.0",
