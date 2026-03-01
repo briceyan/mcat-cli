@@ -176,6 +176,13 @@ ProxyPortArg = Annotated[
         help=f"Local proxy port (default: {proxy_mod.DEFAULT_PROXY_PORT}).",
     ),
 ]
+ProxyUpPortArg = Annotated[
+    str | None,
+    typer.Argument(
+        metavar="PORT",
+        help="Local proxy port (optional). If omitted, mcat picks an available port.",
+    ),
+]
 
 
 @dataclass(slots=True)
@@ -285,26 +292,27 @@ proxy_cmd = typer.Typer()
 
 @proxy_cmd.command(
     "up",
-    help="Start a local FastMCP stdio-to-HTTP proxy.",
+    help="Start a proxy. Pass command after `--` (example: mcat proxy up 6010 -- codex mcp-server).",
     cls=HelpOnMissingParamsCommand,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def proxy_up(
     ctx: typer.Context,
-    port: ProxyPortArg = None,
+    port: ProxyUpPortArg = None,
 ) -> None:
     _ = _runtime(ctx)
+    resolved_port, command = _parse_proxy_up_inputs(port, ctx.args)
     _run_json_command(
         lambda: proxy_mod.proxy_up(
-            port=port or proxy_mod.DEFAULT_PROXY_PORT,
-            command=_parse_passthrough_command(ctx.args),
+            port=resolved_port,
+            command=command,
         )
     )
 
 
 @proxy_cmd.command(
     "down",
-    help="Stop a local FastMCP stdio-to-HTTP proxy.",
+    help="Stop a proxy.",
     cls=HelpOnMissingParamsCommand,
 )
 def proxy_down(
@@ -319,7 +327,7 @@ def proxy_down(
 
 @proxy_cmd.command(
     "status",
-    help="Show status for a local FastMCP stdio-to-HTTP proxy.",
+    help="Show status for a proxy.",
     cls=HelpOnMissingParamsCommand,
 )
 def proxy_status(
@@ -531,7 +539,7 @@ app.command(
     help="Initialize MCP sessions.",
     cls=HelpOnMissingParamsCommand,
 )(init_default)
-app.add_typer(proxy_cmd, name="proxy", help="Manage local FastMCP proxy.", **conf)
+app.add_typer(proxy_cmd, name="proxy", help="Translate stdio to HTTP.", **conf)
 app.add_typer(tool_cmd, name="tool", help="Use MCP tools.", **conf)
 app.add_typer(resource_cmd, name="resource", help="Use MCP resources.", **conf)
 app.add_typer(prompt_cmd, name="prompt", help="Use MCP prompts.", **conf)
@@ -634,8 +642,38 @@ def _parse_passthrough_command(extra_args: list[str]) -> list[str]:
     if args and args[0] == "--":
         args = args[1:]
     if not args:
-        raise ValueError("missing command after --")
+        raise ValueError(
+            "missing command after -- (example: mcat proxy up 6010 -- codex mcp-server)"
+        )
     return args
+
+
+def _parse_proxy_up_inputs(
+    port_hint: str | None, extra_args: list[str]
+) -> tuple[int | None, list[str]]:
+    args = list(extra_args)
+    if args and args[0] == "--":
+        args = args[1:]
+
+    if port_hint is None:
+        command = args
+        resolved_port: int | None = None
+    else:
+        text = port_hint.strip()
+        if text.isdigit():
+            resolved_port = int(text)
+            command = args
+        else:
+            resolved_port = None
+            command = [port_hint, *args]
+
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise ValueError(
+            "missing command after -- (example: mcat proxy up 6010 -- codex mcp-server)"
+        )
+    return resolved_port, command
 
 
 def _runtime(ctx: typer.Context) -> GlobalOpts:

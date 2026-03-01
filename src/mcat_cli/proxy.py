@@ -28,7 +28,7 @@ DEFAULT_PROXY_PORT = 6010
 _ACTIVE_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 
 
-def proxy_up(*, port: int, command: list[str]) -> dict[str, Any]:
+def proxy_up(*, port: int | None, command: list[str]) -> dict[str, Any]:
     normalized, host, resolved_port, path = _proxy_endpoint_for_port(port)
     resolved_command = _normalize_command(command)
     info_path, log_path = _proxy_artifact_paths(normalized)
@@ -167,8 +167,8 @@ def run_proxy_server(*, endpoint: str, command: list[str]) -> None:
     _ = normalized
 
 
-def _proxy_endpoint_for_port(port: int) -> tuple[str, str, int, str]:
-    resolved_port = _normalize_port(port)
+def _proxy_endpoint_for_port(port: int | None) -> tuple[str, str, int, str]:
+    resolved_port = _pick_port(port)
     endpoint = (
         f"http://{_DEFAULT_PROXY_HOST}:{resolved_port}{_DEFAULT_PROXY_PATH}"
     )
@@ -176,11 +176,23 @@ def _proxy_endpoint_for_port(port: int) -> tuple[str, str, int, str]:
     return normalized, host, parsed_port, path
 
 
+def _pick_port(value: int | None) -> int:
+    if value is None:
+        return _find_available_port()
+    return _normalize_port(value)
+
+
 def _normalize_port(value: int) -> int:
     port = int(value)
     if port <= 0 or port > 65535:
         raise ValueError("PORT must be in range 1..65535")
     return port
+
+
+def _find_available_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((_DEFAULT_PROXY_HOST, 0))
+        return int(sock.getsockname()[1])
 
 
 def _parse_proxy_endpoint(raw: str) -> tuple[str, str, int, str]:

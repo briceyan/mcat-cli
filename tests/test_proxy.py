@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from urllib import parse as urlparse
 
 from mcat_cli import mcp, proxy
 
@@ -19,6 +20,31 @@ class ProxyFastMcpTest(unittest.TestCase):
     def test_proxy_up_requires_command(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing proxy command"):
             proxy.proxy_up(port=9876, command=[])
+
+    def test_proxy_up_auto_port_reports_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stub_file = Path(temp_dir) / "stub_stdio_server.py"
+            stub_file.write_text(
+                _stub_server_source(),
+                encoding="utf-8",
+            )
+            up = proxy.proxy_up(
+                port=None,
+                command=[sys.executable, str(stub_file)],
+            )
+            endpoint = str(up["endpoint"])
+            parsed = urlparse.urlsplit(endpoint)
+            self.assertEqual(parsed.scheme, "http")
+            self.assertEqual(parsed.hostname, "127.0.0.1")
+            self.assertEqual(parsed.path, "/mcp")
+            self.assertIsNotNone(parsed.port)
+            port = int(parsed.port or 0)
+            self.assertGreater(port, 0)
+            try:
+                status = proxy.proxy_status(port=port)
+                self.assertTrue(status["running"])
+            finally:
+                proxy.proxy_down(port=port)
 
     def test_proxy_up_status_down_with_init(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
