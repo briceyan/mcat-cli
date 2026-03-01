@@ -166,7 +166,14 @@ ProxyEndpointArg = Annotated[
     typer.Argument(
         ...,
         metavar="ENDPOINT",
-        help="Local HTTP endpoint, e.g. http://HOST:PORT/mcp (path optional).",
+        help="Local HTTP endpoint for internal proxy server command.",
+    ),
+]
+ProxyPortArg = Annotated[
+    int | None,
+    typer.Argument(
+        metavar="PORT",
+        help=f"Local proxy port (default: {proxy_mod.DEFAULT_PROXY_PORT}).",
     ),
 ]
 
@@ -284,12 +291,12 @@ proxy_cmd = typer.Typer()
 )
 def proxy_up(
     ctx: typer.Context,
-    endpoint: ProxyEndpointArg,
+    port: ProxyPortArg = None,
 ) -> None:
     _ = _runtime(ctx)
     _run_json_command(
         lambda: proxy_mod.proxy_up(
-            endpoint=endpoint,
+            port=port or proxy_mod.DEFAULT_PROXY_PORT,
             command=_parse_passthrough_command(ctx.args),
         )
     )
@@ -302,10 +309,12 @@ def proxy_up(
 )
 def proxy_down(
     ctx: typer.Context,
-    endpoint: ProxyEndpointArg,
+    port: ProxyPortArg = None,
 ) -> None:
     _ = _runtime(ctx)
-    _run_json_command(lambda: proxy_mod.proxy_down(endpoint=endpoint))
+    _run_json_command(
+        lambda: proxy_mod.proxy_down(port=port or proxy_mod.DEFAULT_PROXY_PORT)
+    )
 
 
 @proxy_cmd.command(
@@ -315,10 +324,12 @@ def proxy_down(
 )
 def proxy_status(
     ctx: typer.Context,
-    endpoint: ProxyEndpointArg,
+    port: ProxyPortArg = None,
 ) -> None:
     _ = _runtime(ctx)
-    _run_json_command(lambda: proxy_mod.proxy_status(endpoint=endpoint))
+    _run_json_command(
+        lambda: proxy_mod.proxy_status(port=port or proxy_mod.DEFAULT_PROXY_PORT)
+    )
 
 
 @proxy_cmd.command(

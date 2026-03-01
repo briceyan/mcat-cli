@@ -22,11 +22,14 @@ from .util.atomic_files import write_json_object_locked
 
 _START_TIMEOUT_SECONDS = 8.0
 _STOP_TIMEOUT_SECONDS = 5.0
+_DEFAULT_PROXY_HOST = "127.0.0.1"
+_DEFAULT_PROXY_PATH = "/mcp"
+DEFAULT_PROXY_PORT = 6010
 _ACTIVE_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 
 
-def proxy_up(*, endpoint: str, command: list[str]) -> dict[str, Any]:
-    normalized, host, port, path = _parse_proxy_endpoint(endpoint)
+def proxy_up(*, port: int, command: list[str]) -> dict[str, Any]:
+    normalized, host, resolved_port, path = _proxy_endpoint_for_port(port)
     resolved_command = _normalize_command(command)
     info_path, log_path = _proxy_artifact_paths(normalized)
 
@@ -57,7 +60,9 @@ def proxy_up(*, endpoint: str, command: list[str]) -> dict[str, Any]:
             start_new_session=True,
         )
 
-    if not _wait_for_http_ready(host, port, process, timeout_seconds=_START_TIMEOUT_SECONDS):
+    if not _wait_for_http_ready(
+        host, resolved_port, process, timeout_seconds=_START_TIMEOUT_SECONDS
+    ):
         _terminate_subprocess(process)
         _ACTIVE_PROCESSES.pop(process.pid, None)
         raise ValueError(
@@ -68,7 +73,7 @@ def proxy_up(*, endpoint: str, command: list[str]) -> dict[str, Any]:
         "version": 1,
         "endpoint": normalized,
         "host": host,
-        "port": port,
+        "port": resolved_port,
         "path": path,
         "pid": process.pid,
         "command": resolved_command[0],
@@ -91,8 +96,8 @@ def proxy_up(*, endpoint: str, command: list[str]) -> dict[str, Any]:
     }
 
 
-def proxy_down(*, endpoint: str) -> dict[str, Any]:
-    normalized, _, _, _ = _parse_proxy_endpoint(endpoint)
+def proxy_down(*, port: int) -> dict[str, Any]:
+    normalized, _, _, _ = _proxy_endpoint_for_port(port)
     info_path, log_path = _proxy_artifact_paths(normalized)
     info = _read_proxy_info_if_exists(info_path)
 
@@ -118,8 +123,8 @@ def proxy_down(*, endpoint: str) -> dict[str, Any]:
     }
 
 
-def proxy_status(*, endpoint: str) -> dict[str, Any]:
-    normalized, _, _, _ = _parse_proxy_endpoint(endpoint)
+def proxy_status(*, port: int) -> dict[str, Any]:
+    normalized, _, _, _ = _proxy_endpoint_for_port(port)
     info_path, log_path = _proxy_artifact_paths(normalized)
     info = _read_proxy_info_if_exists(info_path)
     pid = _extract_pid(info)
@@ -160,6 +165,22 @@ def run_proxy_server(*, endpoint: str, command: list[str]) -> None:
         show_banner=False,
     )
     _ = normalized
+
+
+def _proxy_endpoint_for_port(port: int) -> tuple[str, str, int, str]:
+    resolved_port = _normalize_port(port)
+    endpoint = (
+        f"http://{_DEFAULT_PROXY_HOST}:{resolved_port}{_DEFAULT_PROXY_PATH}"
+    )
+    normalized, host, parsed_port, path = _parse_proxy_endpoint(endpoint)
+    return normalized, host, parsed_port, path
+
+
+def _normalize_port(value: int) -> int:
+    port = int(value)
+    if port <= 0 or port > 65535:
+        raise ValueError("PORT must be in range 1..65535")
+    return port
 
 
 def _parse_proxy_endpoint(raw: str) -> tuple[str, str, int, str]:

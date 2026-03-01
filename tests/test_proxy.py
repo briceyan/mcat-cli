@@ -18,7 +18,7 @@ def _free_port() -> int:
 class ProxyFastMcpTest(unittest.TestCase):
     def test_proxy_up_requires_command(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing proxy command"):
-            proxy.proxy_up(endpoint="http://127.0.0.1:9876/mcp", command=[])
+            proxy.proxy_up(port=9876, command=[])
 
     def test_proxy_up_status_down_with_init(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -31,12 +31,12 @@ class ProxyFastMcpTest(unittest.TestCase):
                 encoding="utf-8",
             )
             try:
-                proxy.proxy_down(endpoint=endpoint)
+                proxy.proxy_down(port=port)
             except Exception:
                 pass
 
             up = proxy.proxy_up(
-                endpoint=endpoint,
+                port=port,
                 command=[sys.executable, str(stub_file)],
             )
             status: dict[str, object] = {}
@@ -44,7 +44,7 @@ class ProxyFastMcpTest(unittest.TestCase):
                 self.assertEqual(up["endpoint"], endpoint)
                 self.assertTrue(Path(up["proxy"]).exists())
 
-                status = proxy.proxy_status(endpoint=endpoint)
+                status = proxy.proxy_status(port=port)
                 self.assertTrue(status["running"])
 
                 init_result = mcp.init_session(
@@ -64,7 +64,7 @@ class ProxyFastMcpTest(unittest.TestCase):
                 self.assertEqual(call.get("content"), [{"type": "text", "text": "pong"}])
                 self.assertFalse(call.get("isError", False))
             finally:
-                down = proxy.proxy_down(endpoint=endpoint)
+                down = proxy.proxy_down(port=port)
                 self.assertFalse(Path(up["proxy"]).exists())
                 if status.get("running"):
                     self.assertTrue(down["stopped"])
