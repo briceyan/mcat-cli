@@ -25,7 +25,7 @@ LOGGER = logging.getLogger("mcat.proxy")
 
 _START_TIMEOUT_SECONDS = 5.0
 _STOP_TIMEOUT_SECONDS = 5.0
-_IO_TIMEOUT_SECONDS = 20.0
+_IO_TIMEOUT_SECONDS = 300.0
 _ACTIVE_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 
 
@@ -242,6 +242,9 @@ class _UnixJsonRpcHandler(BaseHTTPRequestHandler):
 
         try:
             response = self.server.bridge.forward(payload)
+        except _BridgeTimeoutError as exc:
+            self._send_json(504, {"error": str(exc)})
+            return
         except ValueError as exc:
             self._send_json(502, {"error": str(exc)})
             return
@@ -307,7 +310,10 @@ class _StdioBridge:
             try:
                 item = waiter.get(timeout=_IO_TIMEOUT_SECONDS)
             except queue.Empty:
-                raise ValueError("timed out waiting for response from stdio MCP server")
+                raise _BridgeTimeoutError(
+                    "timed out waiting for response from stdio MCP server "
+                    f"(timeout={int(_IO_TIMEOUT_SECONDS)}s)"
+                )
             if isinstance(item, Exception):
                 raise ValueError(str(item))
             return item
@@ -437,6 +443,10 @@ def _read_stdio_message(stream: Any) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         raise ValueError("invalid stdio MCP payload: expected JSON object")
     return parsed
+
+
+class _BridgeTimeoutError(ValueError):
+    pass
 
 
 def _request_id_key(value: Any) -> str:
