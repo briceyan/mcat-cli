@@ -164,7 +164,9 @@ ResourceOutOpt = Annotated[
 ProxyEndpointArg = Annotated[
     str,
     typer.Argument(
-        ..., metavar="ENDPOINT", help="Local HTTP endpoint (http://HOST:PORT[/mcp])."
+        ...,
+        metavar="ENDPOINT",
+        help="Local HTTP endpoint, e.g. http://HOST:PORT/mcp (path optional).",
     ),
 ]
 
