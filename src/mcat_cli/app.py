@@ -13,32 +13,41 @@ import typer
 from typer.core import TyperCommand, TyperGroup
 
 from . import auth as auth_mod
+from . import bridge as bridge_mod
 from . import mcp as mcp_mod
-from . import proxy as proxy_mod
-from .util.logging import configure_logging, parse_log_specs
+from .util.logging import configure_logging, resolve_enabled_logs
 
 APP_LOGGER = logging.getLogger("mcat.app")
 
 
+VerboseOpt = Annotated[
+    int,
+    typer.Option(
+        "-v",
+        "--verbose",
+        count=True,
+        help="Set the default log level for standard modules. Use `-v` for info and `-vv` for debug.",
+    ),
+]
 LogSpecsOpt = Annotated[
     list[str] | None,
     typer.Option(
         "--log",
-        help="Enable logs by domain (`app`, `auth`, `proxy`, `mcp`) optionally with `:LEVEL`.",
+        help="Override specific modules (`auth:debug,mcp:info`). Comma-separated.",
     ),
 ]
-LogStderrOpt = Annotated[
+LegacyLogStderrOpt = Annotated[
     bool,
     typer.Option(
         "--log-stderr",
-        help="Emit enabled logs to stderr.",
+        hidden=True,
     ),
 ]
-LogFileOpt = Annotated[
+LogOutputOpt = Annotated[
     str | None,
     typer.Option(
-        "--log-file",
-        help="Write enabled logs to file.",
+        "--log-output",
+        help="Write logs to PATH instead of stderr.",
         metavar="PATH",
     ),
 ]
@@ -47,6 +56,30 @@ EndpointArg = Annotated[
     str,
     typer.Argument(..., metavar="ENDPOINT", help="Server URL."),
 ]
+OptionalEndpointArg = Annotated[
+    str | None,
+    typer.Argument(metavar="ENDPOINT", help="Server URL."),
+]
+
+ConnectionFileOpt = Annotated[
+    str,
+    typer.Option(
+        "-c",
+        "--connection",
+        metavar="CONNECTION_FILE",
+        help="Path to connection file.",
+    ),
+]
+AuthConnectionFileOpt = Annotated[
+    str,
+    typer.Option(
+        "-c",
+        "--connection",
+        "--state",
+        metavar="CONNECTION_FILE",
+        help="Path to connection file.",
+    ),
+]
 
 KeyRefOpt = Annotated[
     str,
@@ -54,13 +87,13 @@ KeyRefOpt = Annotated[
         "-k", "--key-ref", metavar="KEY_REF", help="Where to read key/token from."
     ),
 ]
-InitKeyRefOpt = Annotated[
+OptionalKeyRefOpt = Annotated[
     str | None,
     typer.Option(
         "-k",
         "--key-ref",
         metavar="KEY_REF",
-        help="Where to read key/token from (optional for unauthenticated HTTP endpoints).",
+        help="Where to read key/token from.",
     ),
 ]
 KeyRefOverwriteOpt = Annotated[
@@ -68,18 +101,17 @@ KeyRefOverwriteOpt = Annotated[
     typer.Option("-o", "--overwrite", help="Allow replacing an existing value."),
 ]
 
-AuthWaitOpt = Annotated[
+AuthCompleteOpt = Annotated[
     bool,
-    typer.Option("--wait", help="Wait for auth completion."),
-]
-AuthStateFileOpt = Annotated[
-    str,
-    typer.Option("--state", metavar="AUTH_STATE_FILE", help="Path to auth state file."),
+    typer.Option(
+        "--complete",
+        "--wait",
+        help="Run until authorization completes and the token is stored.",
+    ),
 ]
 AuthClientRefOpt = Annotated[
     str | None,
     typer.Option(
-        "-c",
         "--client",
         metavar="CLIENT_INFO_FILE",
         help="Path to OAuth client info JSON file.",
@@ -109,14 +141,58 @@ AuthClientNameOpt = Annotated[
         help="Dynamic client registration name override.",
     ),
 ]
-
-SessionInfoOutOpt = Annotated[
-    str,
+AuthCallbackOpt = Annotated[
+    str | None,
     typer.Option(
-        "-o", "--out", metavar="SESSION_INFO_FILE", help="Save session info to file."
+        "--callback",
+        "--callback-url",
+        metavar="URL",
+        help="Public callback URL used in the OAuth authorization request.",
     ),
 ]
-SessionInfoFileOpt = Annotated[
+AuthListenOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--listen",
+        "--callback-local-url",
+        metavar="ADDR",
+        help="Local callback listener address (`PORT`, `HOST:PORT`, or local `http://...` URL).",
+    ),
+]
+CallbackProxyListenOpt = Annotated[
+    str,
+    typer.Option(
+        "--listen",
+        metavar="ADDR",
+        help="Expose a callback address (`PORT`, `HOST:PORT`, or local `http://...` URL).",
+    ),
+]
+CallbackProxyToOpt = Annotated[
+    str,
+    typer.Option(
+        "--to",
+        metavar="TARGET",
+        help="Forward to a callback address (`PORT`, `HOST:PORT`, local `http://...` URL, or absolute URL).",
+    ),
+]
+CallbackTargetListenOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--listen",
+        metavar="ADDR",
+        help="Resolve a callback address (`PORT`, `HOST:PORT`, or local `http://...` URL).",
+    ),
+]
+CallbackTargetHostOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--host",
+        metavar="HOST",
+        help="Use HOST in the resolved target URL.",
+    ),
+]
+
+SessionFileOpt = Annotated[
     str,
     typer.Option(
         "-s",
@@ -125,7 +201,17 @@ SessionInfoFileOpt = Annotated[
         help="Path to session info file.",
     ),
 ]
-
+InitSessionFileOpt = Annotated[
+    str,
+    typer.Option(
+        "-s",
+        "--session",
+        "-o",
+        "--out",
+        metavar="SESSION_INFO_FILE",
+        help="Path to session info file.",
+    ),
+]
 ToolNameArg = Annotated[
     str, typer.Argument(..., metavar="TOOL_NAME", help="Tool name.")
 ]
@@ -161,26 +247,20 @@ ResourceOutOpt = Annotated[
         help="Write resource content to FILE(`-` to stdout).",
     ),
 ]
-ProxyEndpointArg = Annotated[
+BridgeEndpointArg = Annotated[
     str,
     typer.Argument(
         ...,
         metavar="ENDPOINT",
-        help="Local HTTP endpoint for internal proxy server command.",
+        help="Local HTTP endpoint for internal bridge server command.",
     ),
 ]
-ProxyPortArg = Annotated[
+BridgePortOpt = Annotated[
     int | None,
-    typer.Argument(
+    typer.Option(
+        "--port",
         metavar="PORT",
-        help=f"Local proxy port (default: {proxy_mod.DEFAULT_PROXY_PORT}).",
-    ),
-]
-ProxyUpPortArg = Annotated[
-    str | None,
-    typer.Argument(
-        metavar="PORT",
-        help="Local proxy port (optional). If omitted, mcat picks an available port.",
+        help=f"Local bridge port (default: {bridge_mod.DEFAULT_BRIDGE_PORT}).",
     ),
 ]
 
@@ -188,7 +268,6 @@ ProxyUpPortArg = Annotated[
 @dataclass(slots=True)
 class GlobalOpts:
     enabled_logs: dict[str, int]
-    log_stderr: bool
     log_file: str | None
 
 
@@ -206,7 +285,7 @@ class McatTopLevelGroup(TyperGroup):
         commands = list(super().list_commands(ctx))
         if not commands:
             return commands
-        preferred_order = {"auth": 0, "init": 1}
+        preferred_order = {"bridge": 0, "auth": 1, "init": 2}
         existing_index = {name: idx for idx, name in enumerate(commands)}
         commands.sort(
             key=lambda name: (preferred_order.get(name, 2), existing_index[name])
@@ -214,36 +293,30 @@ class McatTopLevelGroup(TyperGroup):
         return commands
 
 
-auth_cmd = typer.Typer()
-
-
-@auth_cmd.command(
-    "start",
-    help="Start an OAuth authorization flow.",
-    cls=HelpOnMissingParamsCommand,
-)
-def auth_start(
+def auth_default(
     ctx: typer.Context,
-    endpoint: EndpointArg,
-    key_ref: KeyRefOpt,
-    state_file: AuthStateFileOpt,
+    endpoint: OptionalEndpointArg = None,
+    connection_file: AuthConnectionFileOpt = "",
+    key_ref: OptionalKeyRefOpt = None,
     client: AuthClientRefOpt = None,
     client_id: AuthClientIdOpt = None,
     client_secret: AuthClientSecretOpt = None,
     client_name: AuthClientNameOpt = None,
+    callback_url: AuthCallbackOpt = None,
+    listen: AuthListenOpt = None,
     overwrite: KeyRefOverwriteOpt = False,
-    wait: AuthWaitOpt = False,
+    complete: AuthCompleteOpt = False,
 ) -> None:
-    if ctx.invoked_subcommand is not None:
-        return
     _ = _runtime(ctx)
     _run_json_command(
-        lambda: auth_mod.start_auth(
+        lambda: auth_mod.run_auth(
             endpoint=endpoint,
+            connection_file=connection_file,
             key_ref=key_ref,
-            state_file=state_file,
-            wait=wait,
+            complete=complete,
             overwrite=overwrite,
+            callback_url=callback_url,
+            listen=listen,
             client_ref=client,
             client_id_override=client_id,
             client_secret_override=client_secret,
@@ -252,107 +325,88 @@ def auth_start(
     )
 
 
-@auth_cmd.command(
-    "continue",
-    help="Continue a pending OAuth authorization flow.",
-    cls=HelpOnMissingParamsCommand,
-)
-def auth_continue(
-    ctx: typer.Context,
-    state_file: AuthStateFileOpt,
-    key_ref: KeyRefOpt,
-    overwrite: KeyRefOverwriteOpt = False,
-) -> None:
-    _ = _runtime(ctx)
-    _run_json_command(
-        lambda: auth_mod.continue_auth(
-            state_file=state_file,
-            key_ref=key_ref,
-            overwrite=overwrite,
-        )
-    )
-
-
 def init_default(
     ctx: typer.Context,
-    endpoint: EndpointArg,
-    sess_info_file: SessionInfoOutOpt,
-    key_ref: InitKeyRefOpt = None,
+    connection_file: ConnectionFileOpt,
+    sess_info_file: InitSessionFileOpt,
 ) -> None:
     _ = _runtime(ctx)
     _run_json_command(
         lambda: mcp_mod.init_session(
-            endpoint=endpoint, key_ref=key_ref, sess_info_file=sess_info_file
+            connection_file=connection_file,
+            sess_info_file=sess_info_file,
         )
     )
 
 
-proxy_cmd = typer.Typer()
+bridge_cmd = typer.Typer()
 
 
-@proxy_cmd.command(
-    "up",
-    help="Start a proxy. Pass command after `--` (example: mcat proxy up 6010 -- codex mcp-server).",
+@bridge_cmd.command(
+    "start",
+    help="Start a stdio-to-HTTP bridge. Pass command after `--`.",
     cls=HelpOnMissingParamsCommand,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
-def proxy_up(
+def bridge_start(
     ctx: typer.Context,
-    port: ProxyUpPortArg = None,
+    connection_file: ConnectionFileOpt,
+    port: BridgePortOpt = None,
 ) -> None:
     _ = _runtime(ctx)
-    resolved_port, command = _parse_proxy_up_inputs(port, ctx.args)
+    command = _parse_passthrough_command(ctx.args)
     _run_json_command(
-        lambda: proxy_mod.proxy_up(
-            port=resolved_port,
+        lambda: bridge_mod.bridge_start(
+            connection_file=connection_file,
+            port=port,
             command=command,
         )
     )
 
 
-@proxy_cmd.command(
-    "down",
-    help="Stop a proxy.",
+@bridge_cmd.command(
+    "stop",
+    help="Stop a bridge.",
     cls=HelpOnMissingParamsCommand,
 )
-def proxy_down(
+def bridge_stop(
     ctx: typer.Context,
-    port: ProxyPortArg = None,
+    connection_file: ConnectionFileOpt,
 ) -> None:
     _ = _runtime(ctx)
     _run_json_command(
-        lambda: proxy_mod.proxy_down(port=port or proxy_mod.DEFAULT_PROXY_PORT)
+        lambda: bridge_mod.bridge_stop(connection_file=connection_file)
     )
 
 
-@proxy_cmd.command(
+@bridge_cmd.command(
     "status",
-    help="Show status for a proxy.",
+    help="Show status for a bridge.",
     cls=HelpOnMissingParamsCommand,
 )
-def proxy_status(
+def bridge_status(
     ctx: typer.Context,
-    port: ProxyPortArg = None,
+    connection_file: ConnectionFileOpt,
 ) -> None:
     _ = _runtime(ctx)
     _run_json_command(
-        lambda: proxy_mod.proxy_status(port=port or proxy_mod.DEFAULT_PROXY_PORT)
+        lambda: bridge_mod.bridge_status(connection_file=connection_file)
     )
 
 
-@proxy_cmd.command(
+@bridge_cmd.command(
     "_serve",
     hidden=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
-def proxy_serve(
+def bridge_serve(
     ctx: typer.Context,
-    endpoint: ProxyEndpointArg,
+    endpoint: BridgeEndpointArg,
 ) -> None:
     _ = _runtime(ctx)
     command = _parse_passthrough_command(ctx.args)
     try:
-        proxy_mod.run_proxy_server(endpoint=endpoint, command=command)
+        bridge_mod.run_bridge_server(endpoint=endpoint, command=command)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
@@ -368,7 +422,7 @@ resource_cmd = typer.Typer()
 )
 def resource_list(
     ctx: typer.Context,
-    sess_info_file: SessionInfoFileOpt,
+    sess_info_file: SessionFileOpt,
     cursor: ResourceCursorOpt = None,
 ) -> None:
     _ = _runtime(ctx)
@@ -387,7 +441,7 @@ def resource_list(
 )
 def resource_list_template(
     ctx: typer.Context,
-    sess_info_file: SessionInfoFileOpt,
+    sess_info_file: SessionFileOpt,
     cursor: ResourceCursorOpt = None,
 ) -> None:
     _ = _runtime(ctx)
@@ -407,7 +461,7 @@ def resource_list_template(
 def resource_read(
     ctx: typer.Context,
     uri: ResourceUriArg,
-    sess_info_file: SessionInfoFileOpt,
+    sess_info_file: SessionFileOpt,
     out_file: ResourceOutOpt = None,
 ) -> None:
     _ = _runtime(ctx)
@@ -444,7 +498,7 @@ tool_cmd = typer.Typer()
 @tool_cmd.command("list", help="List tools available.", cls=HelpOnMissingParamsCommand)
 def tool_list(
     ctx: typer.Context,
-    sess_info_file: SessionInfoFileOpt,
+    sess_info_file: SessionFileOpt,
 ) -> None:
     _ = _runtime(ctx)
     _run_json_command(lambda: mcp_mod.list_tools(sess_info_file=sess_info_file))
@@ -455,7 +509,7 @@ def tool_call(
     ctx: typer.Context,
     tool_name: ToolNameArg,
     args_input: ToolInputOpt,
-    sess_info_file: SessionInfoFileOpt,
+    sess_info_file: SessionFileOpt,
 ) -> None:
     _ = _runtime(ctx)
     _run_json_command(
@@ -477,7 +531,7 @@ prompt_cmd = typer.Typer()
 )
 def prompt_list(
     ctx: typer.Context,
-    sess_info_file: SessionInfoFileOpt,
+    sess_info_file: SessionFileOpt,
     cursor: ResourceCursorOpt = None,
 ) -> None:
     _ = _runtime(ctx)
@@ -493,7 +547,7 @@ def prompt_list(
 def prompt_get(
     ctx: typer.Context,
     prompt_name: PromptNameArg,
-    sess_info_file: SessionInfoFileOpt,
+    sess_info_file: SessionFileOpt,
     args_input: PromptInputOpt = None,
 ) -> None:
     _ = _runtime(ctx)
@@ -508,20 +562,24 @@ def prompt_get(
 
 def parse_global_opts(
     ctx: typer.Context,
+    verbose: VerboseOpt = 0,
     log_specs: LogSpecsOpt = None,
-    log_stderr: LogStderrOpt = False,
-    log_file: LogFileOpt = None,
+    log_stderr: LegacyLogStderrOpt = False,
+    log_file: LogOutputOpt = None,
 ) -> None:
-    specs = log_specs or []
     try:
-        enabled_logs = parse_log_specs(specs)
+        enabled_logs = resolve_enabled_logs(verbosity=verbose, specs=log_specs)
+        emit_logs_to_stderr = log_stderr or (bool(enabled_logs) and not log_file)
         configure_logging(
-            enabled=enabled_logs, log_stderr=log_stderr, log_file=log_file
+            enabled=enabled_logs,
+            log_stderr=emit_logs_to_stderr,
+            log_file=log_file,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc))
     ctx.obj = GlobalOpts(
-        enabled_logs=enabled_logs, log_stderr=log_stderr, log_file=log_file
+        enabled_logs=enabled_logs,
+        log_file=log_file,
     )
     APP_LOGGER.debug("runtime initialized")
 
@@ -529,17 +587,75 @@ def parse_global_opts(
 conf: dict[str, Any] = {"no_args_is_help": True}
 app = typer.Typer(
     cls=McatTopLevelGroup,
+    add_completion=False,
     help="The model-context access tool for agents and humans.",
     callback=parse_global_opts,
     **conf,
 )
-app.add_typer(auth_cmd, name="auth", help="Authorize MCP server access.", **conf)
+app.command(
+    "auth",
+    help="Authorize MCP server access.",
+    cls=HelpOnMissingParamsCommand,
+)(auth_default)
+
+
+@app.command(
+    "callback-proxy",
+    hidden=True,
+    help="Start a simple callback relay.",
+    cls=HelpOnMissingParamsCommand,
+)
+def callback_proxy(
+    ctx: typer.Context,
+    listen: CallbackProxyListenOpt,
+    forward_to: CallbackProxyToOpt,
+) -> None:
+    _ = _runtime(ctx)
+    try:
+        resolved_target = auth_mod.resolve_callback_proxy_target(forward_to)
+        handle = auth_mod.start_callback_proxy(listen=listen, target=resolved_target)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from None
+
+    typer.echo(
+        f"Callback proxy listening on {handle.listen_uri} forwarding to {handle.target_url}",
+        err=True,
+    )
+    try:
+        handle.thread.join()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        auth_mod.stop_callback_proxy(handle)
+
+
+@app.command(
+    "callback-target",
+    hidden=True,
+    help="Resolve concrete callback URLs.",
+    cls=HelpOnMissingParamsCommand,
+)
+def callback_target(
+    ctx: typer.Context,
+    listen: CallbackTargetListenOpt = None,
+    target_host: CallbackTargetHostOpt = None,
+) -> None:
+    _ = _runtime(ctx)
+    _run_json_command(
+        lambda: auth_mod.build_callback_target(
+            listen=listen,
+            target_host=target_host,
+        )
+    )
+
+
 app.command(
     "init",
     help="Initialize MCP sessions.",
     cls=HelpOnMissingParamsCommand,
 )(init_default)
-app.add_typer(proxy_cmd, name="proxy", help="Translate stdio to HTTP.", **conf)
+app.add_typer(bridge_cmd, name="bridge", help="Bridge stdio to HTTP.", **conf)
 app.add_typer(tool_cmd, name="tool", help="Use MCP tools.", **conf)
 app.add_typer(resource_cmd, name="resource", help="Use MCP resources.", **conf)
 app.add_typer(prompt_cmd, name="prompt", help="Use MCP prompts.", **conf)
@@ -643,37 +759,9 @@ def _parse_passthrough_command(extra_args: list[str]) -> list[str]:
         args = args[1:]
     if not args:
         raise ValueError(
-            "missing command after -- (example: mcat proxy up 6010 -- codex mcp-server)"
+            "missing command after -- (example: mcat bridge start -c local.connection.json -- codex mcp-server)"
         )
     return args
-
-
-def _parse_proxy_up_inputs(
-    port_hint: str | None, extra_args: list[str]
-) -> tuple[int | None, list[str]]:
-    args = list(extra_args)
-    if args and args[0] == "--":
-        args = args[1:]
-
-    if port_hint is None:
-        command = args
-        resolved_port: int | None = None
-    else:
-        text = port_hint.strip()
-        if text.isdigit():
-            resolved_port = int(text)
-            command = args
-        else:
-            resolved_port = None
-            command = [port_hint, *args]
-
-    if command and command[0] == "--":
-        command = command[1:]
-    if not command:
-        raise ValueError(
-            "missing command after -- (example: mcat proxy up 6010 -- codex mcp-server)"
-        )
-    return resolved_port, command
 
 
 def _runtime(ctx: typer.Context) -> GlobalOpts:

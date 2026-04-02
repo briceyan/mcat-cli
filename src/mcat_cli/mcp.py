@@ -16,6 +16,9 @@ from .util.common import (
 from .util.common import (
     normalize_url as _normalize_url,
 )
+from .util.connection_file import (
+    read_connection_file as _read_connection_file,
+)
 from .util.key_ref import (
     normalize_key_ref as _normalize_key_ref,
 )
@@ -28,15 +31,33 @@ from .util.session_info import (
 from .util.session_info import (
     write_session_info as _write_session_info,
 )
+from .version import USER_AGENT as _USER_AGENT
+from .version import __version__ as _VERSION
 
 LOGGER = logging.getLogger("mcat.mcp")
 
 
 def init_session(
-    *, endpoint: str, key_ref: str | None, sess_info_file: str
+    *, connection_file: str, sess_info_file: str
 ) -> dict[str, Any]:
-    LOGGER.info("mcp.init requested endpoint=%s", endpoint)
-    normalized_endpoint = _normalize_url(endpoint, field="ENDPOINT")
+    LOGGER.info("mcp.init requested connection_file=%s", connection_file)
+    conn_doc = _read_connection_file(connection_file)
+    normalized_endpoint = _normalize_url(
+        _require_str(conn_doc.get("endpoint"), "endpoint"),
+        field="endpoint",
+    )
+    if _as_optional_str(conn_doc.get("kind")) == "http":
+        flow = _as_optional_str(conn_doc.get("flow"))
+        state = conn_doc.get("state")
+        status = (
+            _as_optional_str(state.get("status"))
+            if isinstance(state, dict)
+            else None
+        )
+        if flow and status != "complete":
+            raise ValueError("connection authorization is not complete")
+
+    key_ref = _as_optional_str(conn_doc.get("key_ref"))
     normalized_key_ref: str | None = None
     if not sess_info_file.strip():
         raise ValueError("SESS_INFO_FILE is required")
@@ -52,7 +73,7 @@ def init_session(
         "params": {
             "protocolVersion": "2025-03-26",
             "capabilities": {},
-            "clientInfo": {"name": "mcat-cli", "version": "0.1.0"},
+            "clientInfo": {"name": "mcat-cli", "version": _VERSION},
         },
     }
     init_resp = _post_jsonrpc(normalized_endpoint, token, init_payload)
@@ -100,6 +121,7 @@ def init_session(
     result: dict[str, Any] = {
         "session_file": str(Path(sess_info_file)),
         "session_mode": session_doc["session_mode"],
+        "connection_file": str(Path(connection_file)),
     }
     if session_doc["session_id"]:
         result["session_id"] = session_doc["session_id"]
@@ -491,7 +513,7 @@ def _post_jsonrpc(
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
-        "User-Agent": "mcat-cli/0.1",
+        "User-Agent": _USER_AGENT,
     }
     if token.strip():
         headers["Authorization"] = f"Bearer {token}"

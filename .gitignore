@@ -11,3 +11,12 @@ wheels/
 .venv
 
 .env
+
+# Local mcat state artifacts
+*.connection.json
+*.session.json
+*.token.json
+*.c.json
+*.s.json
+*.k.json
+*.json.lock

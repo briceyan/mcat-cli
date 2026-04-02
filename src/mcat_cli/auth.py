@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -18,15 +19,6 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from .util.auth_state import (
-    default_auth_state_file as _default_auth_state_file,
-)
-from .util.auth_state import (
-    read_auth_state_file as _read_auth_state_file,
-)
-from .util.auth_state import (
-    write_auth_state_file as _write_auth_state_file,
-)
 from .util.client_info import (
     ClientInfo as _ClientInfo,
 )
@@ -38,6 +30,15 @@ from .util.common import (
 )
 from .util.common import (
     normalize_url as _normalize_url,
+)
+from .util.connection_file import (
+    CURRENT_CONNECTION_VERSION,
+)
+from .util.connection_file import (
+    read_connection_file as _read_connection_file,
+)
+from .util.connection_file import (
+    write_connection_file as _write_connection_file,
 )
 from .util.key_ref import (
     KeyRefNotFoundError,
@@ -57,6 +58,8 @@ from .util.oauth_discovery import (
 from .util.oauth_discovery import (
     build_protected_resource_metadata_urls as _build_protected_resource_metadata_urls,
 )
+from .version import USER_AGENT as _USER_AGENT
+from .version import __version__ as _VERSION
 
 LOGGER = logging.getLogger("mcat.auth")
 
@@ -107,7 +110,17 @@ class OAuthCallbackServerHandle:
     result: dict[str, str | None]
     expected_state: str
     callback_path: str
+    listen_uri: str
     redirect_uri: str
+
+
+@dataclass(slots=True)
+class CallbackProxyHandle:
+    server: ThreadingHTTPServer
+    thread: threading.Thread
+    listen_uri: str
+    target_url: str
+    callback_path: str
 
 
 class HttpJsonError(RuntimeError):
@@ -126,22 +139,117 @@ class HttpJsonError(RuntimeError):
         super().__init__(f"HTTP {status} for {url}")
 
 
-def start_auth(
+def run_auth(
     *,
-    endpoint: str,
-    key_ref: str,
-    state_file: str | None,
-    wait: bool,
+    endpoint: str | None,
+    connection_file: str,
+    key_ref: str | None,
+    complete: bool,
     overwrite: bool,
+    callback_url: str | None,
+    listen: str | None,
     client_ref: str | None = None,
     client_id_override: str | None = None,
     client_secret_override: str | None = None,
     client_name_override: str | None = None,
 ) -> dict[str, Any]:
-    LOGGER.info("auth.start endpoint=%s wait=%s", endpoint, wait)
-    endpoint = _normalize_url(endpoint, field="ENDPOINT")
-    existing = _existing_valid_token_result(endpoint=endpoint, key_ref=key_ref)
+    LOGGER.info(
+        "auth.run connection_file=%s complete=%s endpoint=%s",
+        connection_file,
+        complete,
+        endpoint or "-",
+    )
+    connection_file = connection_file.strip()
+    if not connection_file:
+        raise ValueError("CONNECTION_FILE is required")
+
+    normalized_endpoint = (
+        _normalize_url(endpoint, field="ENDPOINT") if endpoint is not None else None
+    )
+    connection_path = Path(connection_file)
+    if connection_path.exists():
+        conn_doc = _read_connection_file(connection_file)
+        if _require_connection_str(conn_doc, "kind") != "http":
+            raise ValueError("connection file is not an HTTP auth connection")
+
+        saved_endpoint = _require_connection_str(conn_doc, "endpoint")
+        if normalized_endpoint and normalized_endpoint != saved_endpoint:
+            raise ValueError(
+                "ENDPOINT does not match the endpoint recorded in the connection file"
+            )
+        normalized_endpoint = saved_endpoint
+
+        saved_key_ref = _resolve_connection_key_ref(conn_doc)
+        if key_ref and saved_key_ref and key_ref != saved_key_ref:
+            raise ValueError(
+                "KEY_REF does not match the key_ref recorded in the connection file"
+            )
+        key_ref = key_ref or saved_key_ref
+
+        state = _require_connection_state(conn_doc)
+        flow = _as_optional_str(conn_doc.get("flow"))
+        if state.get("status") == "pending":
+            if not key_ref:
+                raise ValueError("connection file missing key_ref for pending auth flow")
+            if flow == "device_code":
+                if complete:
+                    return _continue_auth_device(
+                        connection_file=connection_file,
+                        conn_doc=conn_doc,
+                        state=state,
+                        key_ref=key_ref,
+                        overwrite=overwrite,
+                    )
+                return _pending_result(
+                    connection_file=connection_file,
+                    conn_doc=conn_doc,
+                    state=state,
+                )
+            if flow == "authorization_code":
+                if complete:
+                    return _continue_auth_authorization_code(
+                        connection_file=connection_file,
+                        conn_doc=conn_doc,
+                        state=state,
+                        key_ref=key_ref,
+                        overwrite=overwrite,
+                        callback_url=callback_url,
+                        listen=listen,
+                    )
+                return _pending_result(
+                    connection_file=connection_file,
+                    conn_doc=conn_doc,
+                    state=state,
+                )
+            raise ValueError("unsupported connection auth flow")
+
+        if not key_ref:
+            raise ValueError("KEY_REF is required when the connection file does not contain one")
+    else:
+        if not normalized_endpoint:
+            raise ValueError("ENDPOINT is required when the connection file does not exist")
+        if not key_ref:
+            raise ValueError("KEY_REF is required when the connection file does not exist")
+        conn_doc = _new_http_connection_doc(
+            endpoint=normalized_endpoint,
+            key_ref=key_ref,
+        )
+
+    if normalized_endpoint is None:
+        normalized_endpoint = _require_connection_str(conn_doc, "endpoint")
+    if key_ref is None:
+        raise ValueError("KEY_REF is required")
+
+    conn_doc["endpoint"] = normalized_endpoint
+    conn_doc["key_ref"] = key_ref
+    conn_doc["kind"] = "http"
+
+    existing = _existing_valid_token_result(endpoint=normalized_endpoint, key_ref=key_ref)
     if existing is not None:
+        conn_doc["flow"] = None
+        conn_doc["state"] = {"status": "complete"}
+        _write_connection_file(connection_file, conn_doc)
+        existing["connection_file"] = connection_file
         return existing
 
     client_cfg = _resolve_client_config(
@@ -150,20 +258,20 @@ def start_auth(
         client_secret_override=client_secret_override,
         client_name_override=client_name_override,
     )
-    oauth_meta = _discover_oauth_metadata(endpoint)
+    oauth_meta = _discover_oauth_metadata(normalized_endpoint)
     selected_flow = _select_auth_flow(oauth_meta)
     _log_auth_capabilities(
-        endpoint=endpoint,
+        endpoint=normalized_endpoint,
         oauth_meta=oauth_meta,
         client_cfg=client_cfg,
         selected_flow=selected_flow,
     )
     if selected_flow == "device_code":
         return _start_auth_device(
-            endpoint=endpoint,
+            connection_file=connection_file,
+            conn_doc=conn_doc,
             key_ref=key_ref,
-            state_file=state_file,
-            wait=wait,
+            complete=complete,
             overwrite=overwrite,
             client_cfg=client_cfg,
             oauth_meta=oauth_meta,
@@ -171,11 +279,13 @@ def start_auth(
 
     if selected_flow == "authorization_code":
         return _start_auth_authorization_code(
-            endpoint=endpoint,
+            connection_file=connection_file,
+            conn_doc=conn_doc,
             key_ref=key_ref,
-            state_file=state_file,
-            wait=wait,
+            complete=complete,
             overwrite=overwrite,
+            callback_url=callback_url,
+            listen=listen,
             client_cfg=client_cfg,
             oauth_meta=oauth_meta,
         )
@@ -270,12 +380,12 @@ def _is_token_valid_for_endpoint(*, endpoint: str, token: str) -> bool:
         "params": {
             "protocolVersion": "2025-03-26",
             "capabilities": {},
-            "clientInfo": {"name": "mcat-cli", "version": "0.1.0"},
+            "clientInfo": {"name": "mcat-cli", "version": _VERSION},
         },
     }
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {
-        "User-Agent": "mcat-cli/0.1",
+        "User-Agent": _USER_AGENT,
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}",
@@ -319,47 +429,40 @@ def _contains_auth_failure_text(text: str) -> bool:
     )
 
 
-def continue_auth(
-    *,
-    state_file: str,
-    key_ref: str,
-    overwrite: bool,
-) -> dict[str, Any]:
-    LOGGER.info("auth.continue state_file=%s", state_file)
-    state_path = Path(state_file)
-    if not state_path.exists():
-        raise ValueError(f"auth state file not found: {state_file}")
+def _new_http_connection_doc(*, endpoint: str, key_ref: str) -> dict[str, Any]:
+    return {
+        "version": CURRENT_CONNECTION_VERSION,
+        "kind": "http",
+        "endpoint": endpoint,
+        "key_ref": key_ref,
+        "flow": None,
+        "state": {},
+    }
 
-    state_doc = _read_auth_state_file(state_file)
-    state = state_doc.get("state")
+
+def _resolve_connection_key_ref(conn_doc: dict[str, Any]) -> str | None:
+    top_level = _as_optional_str(conn_doc.get("key_ref"))
+    if top_level:
+        return top_level
+    state = conn_doc.get("state")
     if not isinstance(state, dict):
-        raise ValueError("invalid auth state file: missing state object")
-    flow = _as_optional_str(state_doc.get("flow"))
-    if flow == "device_code":
-        return _continue_auth_device(
-            state_file=state_file,
-            state_doc=state_doc,
-            state=state,
-            key_ref=key_ref,
-            overwrite=overwrite,
-        )
-    if flow == "authorization_code":
-        return _continue_auth_authorization_code(
-            state_file=state_file,
-            state_doc=state_doc,
-            state=state,
-            key_ref=key_ref,
-            overwrite=overwrite,
-        )
-    raise ValueError("unsupported auth state flow")
+        return None
+    return _as_optional_str(state.get("input_key_ref"))
+
+
+def _require_connection_state(conn_doc: dict[str, Any]) -> dict[str, Any]:
+    state = conn_doc.get("state")
+    if not isinstance(state, dict):
+        raise ValueError("invalid connection file: missing state object")
+    return state
 
 
 def _start_auth_device(
     *,
-    endpoint: str,
+    connection_file: str,
+    conn_doc: dict[str, Any],
     key_ref: str,
-    state_file: str | None,
-    wait: bool,
+    complete: bool,
     overwrite: bool,
     client_cfg: ClientConfig,
     oauth_meta: dict[str, str],
@@ -369,52 +472,54 @@ def _start_auth_device(
         client_cfg=client_cfg,
     )
 
-    resolved_state_file = (
-        state_file or _default_auth_state_file() if not wait else state_file
-    )
-    state_doc = _build_auth_state_doc(
-        endpoint=endpoint,
+    auth_doc = _build_auth_state_doc(
+        endpoint=_require_connection_str(conn_doc, "endpoint"),
         input_key_ref=key_ref,
         oauth_meta=oauth_meta,
         client_cfg=client_cfg,
         device_flow=device_flow,
     )
+    conn_doc["flow"] = auth_doc["flow"]
+    conn_doc["state"] = auth_doc["state"]
+    _write_connection_file(connection_file, conn_doc)
 
-    if resolved_state_file:
-        _write_auth_state_file(resolved_state_file, state_doc)
-
-    if wait:
+    if complete:
         _print_wait_instructions(device_flow)
         token_payload = _poll_until_complete(
-            state_doc["state"],
-            rewrite_state=(resolved_state_file, state_doc)
-            if resolved_state_file
-            else None,
+            auth_doc["state"],
+            rewrite_state=(connection_file, conn_doc),
         )
-        return _finalize_token_result(
+        result = _finalize_token_result(
             token_payload,
             key_ref=key_ref,
             overwrite=overwrite,
         )
+        result["connection_file"] = connection_file
+        return result
 
     return _pending_result(
-        state_file=_require_state_file_for_pending(resolved_state_file),
-        state=state_doc["state"],
+        connection_file=connection_file,
+        conn_doc=conn_doc,
+        state=auth_doc["state"],
     )
 
 
 def _continue_auth_device(
     *,
-    state_file: str,
-    state_doc: dict[str, Any],
+    connection_file: str,
+    conn_doc: dict[str, Any],
     state: dict[str, Any],
     key_ref: str,
     overwrite: bool,
 ) -> dict[str, Any]:
     poll = _poll_token_once(state)
     if poll["status"] == "pending":
-        _write_auth_state_file(state_file, state_doc)
-        return _pending_result(state_file=state_file, state=state)
+        _write_connection_file(connection_file, conn_doc)
+        return _pending_result(
+            connection_file=connection_file,
+            conn_doc=conn_doc,
+            state=state,
+        )
 
     if poll["status"] != "complete":
         raise ValueError("unexpected auth poll result")
@@ -422,21 +527,25 @@ def _continue_auth_device(
     token_payload = poll["token"]
     state["status"] = "complete"
     state["completed_at"] = _now_epoch()
-    _write_auth_state_file(state_file, state_doc)
-    return _finalize_token_result(
+    _write_connection_file(connection_file, conn_doc)
+    result = _finalize_token_result(
         token_payload,
         key_ref=key_ref,
         overwrite=overwrite,
     )
+    result["connection_file"] = connection_file
+    return result
 
 
 def _start_auth_authorization_code(
     *,
-    endpoint: str,
+    connection_file: str,
+    conn_doc: dict[str, Any],
     key_ref: str,
-    state_file: str | None,
-    wait: bool,
+    complete: bool,
     overwrite: bool,
+    callback_url: str | None,
+    listen: str | None,
     client_cfg: ClientConfig,
     oauth_meta: dict[str, str],
 ) -> dict[str, Any]:
@@ -446,13 +555,18 @@ def _start_auth_authorization_code(
         raise ValueError("authorization_code flow metadata is incomplete")
 
     state_nonce = secrets.token_urlsafe(24)
-    callback = _start_oauth_callback_listener(None, state_nonce)
-    resolved_state_file = state_file if wait else (state_file or _default_auth_state_file())
+    callback = _start_oauth_callback_listener(
+        _listen_uri_from_spec(listen),
+        state_nonce,
+    )
     try:
+        oauth_redirect_uri = _normalize_public_callback_url(
+            callback_url or callback.redirect_uri
+        )
         registration = _resolve_client_for_authorization_code(
             oauth_meta=oauth_meta,
             client_cfg=client_cfg,
-            redirect_uri=callback.redirect_uri,
+            redirect_uri=oauth_redirect_uri,
         )
 
         code_verifier = _generate_pkce_verifier()
@@ -463,7 +577,7 @@ def _start_auth_authorization_code(
         auth_url = _build_authorization_request_url(
             authorization_endpoint=authz_endpoint,
             client_id=registration["client_id"],
-            redirect_uri=callback.redirect_uri,
+            redirect_uri=oauth_redirect_uri,
             state=state_nonce,
             code_challenge=code_challenge,
             scope=requested_scope,
@@ -471,25 +585,28 @@ def _start_auth_authorization_code(
             or client_cfg.resource,
         )
 
-        state_doc = _build_auth_code_state_doc(
-            endpoint=endpoint,
+        auth_doc = _build_auth_code_state_doc(
+            endpoint=_require_connection_str(conn_doc, "endpoint"),
             input_key_ref=key_ref,
             oauth_meta=oauth_meta,
             client_id=registration["client_id"],
             client_secret=registration.get("client_secret"),
-            redirect_uri=callback.redirect_uri,
+            oauth_redirect_uri=oauth_redirect_uri,
+            listen_uri=callback.listen_uri,
             code_verifier=code_verifier,
             oauth_state=state_nonce,
             authorization_url=auth_url,
             scope=requested_scope,
         )
-        if resolved_state_file:
-            _write_auth_state_file(resolved_state_file, state_doc)
+        conn_doc["flow"] = auth_doc["flow"]
+        conn_doc["state"] = auth_doc["state"]
+        _write_connection_file(connection_file, conn_doc)
 
-        if not wait:
+        if not complete:
             return _pending_result(
-                state_file=_require_state_file_for_pending(resolved_state_file),
-                state=state_doc["state"],
+                connection_file=connection_file,
+                conn_doc=conn_doc,
+                state=auth_doc["state"],
             )
 
         _print_wait_instructions({"verification_uri_complete": auth_url})
@@ -501,24 +618,25 @@ def _start_auth_authorization_code(
             code=callback_result["code"],
             client_id=registration["client_id"],
             client_secret=registration.get("client_secret"),
-            redirect_uri=callback.redirect_uri,
+            redirect_uri=oauth_redirect_uri,
             code_verifier=code_verifier,
             resource=_as_optional_str(oauth_meta.get("resource"))
             or client_cfg.resource,
         )
 
-        if resolved_state_file:
-            state_doc["state"]["status"] = "complete"
-            state_doc["state"]["completed_at"] = _now_epoch()
-            _write_auth_state_file(resolved_state_file, state_doc)
-        return _finalize_token_result(
+        conn_doc["state"]["status"] = "complete"
+        conn_doc["state"]["completed_at"] = _now_epoch()
+        _write_connection_file(connection_file, conn_doc)
+        result = _finalize_token_result(
             token_payload,
             key_ref=key_ref,
             overwrite=overwrite,
         )
+        result["connection_file"] = connection_file
+        return result
     except TimeoutError:
         raise ValueError(
-            "timed out waiting for OAuth callback (re-run `mcat auth start` or use `mcat auth continue`)"
+            "timed out waiting for OAuth callback (re-run `mcat auth -c CONNECTION_FILE --complete`)"
         ) from None
     finally:
         _stop_oauth_callback_listener(callback)
@@ -526,22 +644,34 @@ def _start_auth_authorization_code(
 
 def _continue_auth_authorization_code(
     *,
-    state_file: str,
-    state_doc: dict[str, Any],
+    connection_file: str,
+    conn_doc: dict[str, Any],
     state: dict[str, Any],
     key_ref: str,
     overwrite: bool,
+    callback_url: str | None,
+    listen: str | None,
 ) -> dict[str, Any]:
-    # Resume by re-opening the same loopback callback listener and waiting for completion.
-    redirect_uri = _require_state_str(state, "redirect_uri")
+    oauth_redirect_uri = _require_state_str(
+        state,
+        "oauth_redirect_uri",
+        fallback_key="redirect_uri",
+    )
+    if callback_url and _normalize_public_callback_url(callback_url) != oauth_redirect_uri:
+        raise ValueError(
+            "callback URL does not match the callback recorded in the connection file"
+        )
+    listen_uri = _require_state_str(
+        state,
+        "listen_uri",
+        fallback_key="redirect_uri",
+    )
+    if listen:
+        listen_uri = _listen_uri_from_spec(listen)
     oauth_state = _require_state_str(state, "oauth_state")
     authorization_url = _require_state_str(state, "authorization_url")
-    callback = _start_oauth_callback_listener(redirect_uri, oauth_state)
-    if callback.redirect_uri != redirect_uri:
-        _stop_oauth_callback_listener(callback)
-        raise ValueError(
-            f"unable to bind saved redirect URI {redirect_uri}; ensure the port is free"
-        )
+    callback = _start_oauth_callback_listener(listen_uri, oauth_state)
+    state["listen_uri"] = callback.listen_uri
     try:
         _print_wait_instructions({"verification_uri_complete": authorization_url})
         callback_result = _wait_for_oauth_callback(
@@ -552,26 +682,33 @@ def _continue_auth_authorization_code(
             code=callback_result["code"],
             client_id=_require_state_str(state, "client_id"),
             client_secret=_as_optional_str(state.get("client_secret")),
-            redirect_uri=redirect_uri,
+            redirect_uri=oauth_redirect_uri,
             code_verifier=_require_state_str(state, "code_verifier"),
             resource=_as_optional_str(state.get("resource")),
         )
         state["status"] = "complete"
         state["completed_at"] = _now_epoch()
-        _write_auth_state_file(state_file, state_doc)
-        return _finalize_token_result(
+        _write_connection_file(connection_file, conn_doc)
+        result = _finalize_token_result(
             token_payload,
             key_ref=key_ref,
             overwrite=overwrite,
         )
+        result["connection_file"] = connection_file
+        return result
     except TimeoutError:
-        _write_auth_state_file(state_file, state_doc)
+        _write_connection_file(connection_file, conn_doc)
         raise ValueError("timed out waiting for OAuth callback") from None
     finally:
         _stop_oauth_callback_listener(callback)
 
 
-def _pending_result(*, state_file: str, state: dict[str, Any]) -> dict[str, Any]:
+def _pending_result(
+    *,
+    connection_file: str,
+    conn_doc: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
     action: dict[str, Any] = {}
     if _as_optional_str(state.get("verification_uri_complete")):
         action["url"] = state["verification_uri_complete"]
@@ -585,9 +722,23 @@ def _pending_result(*, state_file: str, state: dict[str, Any]) -> dict[str, Any]
 
     result: dict[str, Any] = {
         "status": "pending",
-        "state_file": state_file,
+        "connection_file": connection_file,
         "action": action,
     }
+    callback: dict[str, Any] = {}
+    public_url = _as_optional_str(state.get("oauth_redirect_uri")) or _as_optional_str(
+        state.get("redirect_uri")
+    )
+    listen_url = _as_optional_str(state.get("listen_uri"))
+    if public_url:
+        callback["public_url"] = public_url
+    if listen_url:
+        callback["listen_url"] = listen_url
+    if callback:
+        result["callback"] = callback
+    kind = _as_optional_str(conn_doc.get("kind"))
+    if kind:
+        result["kind"] = kind
     return result
 
 
@@ -641,7 +792,7 @@ def _build_auth_state_doc(
         state["resource"] = client_cfg.resource
 
     return {
-        "version": 1,
+        "version": CURRENT_CONNECTION_VERSION,
         "endpoint": endpoint,
         "flow": "device_code",
         "state": state,
@@ -659,14 +810,14 @@ def _poll_until_complete(
             state["status"] = "complete"
             state["completed_at"] = _now_epoch()
             if rewrite_state:
-                _write_auth_state_file(rewrite_state[0], rewrite_state[1])
+                _write_connection_file(rewrite_state[0], rewrite_state[1])
             return poll["token"]
 
         if poll["status"] != "pending":
             raise ValueError("unexpected auth poll status")
 
         if rewrite_state:
-            _write_auth_state_file(rewrite_state[0], rewrite_state[1])
+            _write_connection_file(rewrite_state[0], rewrite_state[1])
 
         now = _now_epoch()
         expires_at = _as_int(state.get("expires_at")) or 0
@@ -882,7 +1033,8 @@ def _build_auth_code_state_doc(
     oauth_meta: dict[str, str],
     client_id: str,
     client_secret: str | None,
-    redirect_uri: str,
+    oauth_redirect_uri: str,
+    listen_uri: str,
     code_verifier: str,
     oauth_state: str,
     authorization_url: str,
@@ -895,7 +1047,9 @@ def _build_auth_code_state_doc(
         ),
         "token_endpoint": _require_state_like(oauth_meta, "token_endpoint"),
         "client_id": client_id,
-        "redirect_uri": redirect_uri,
+        "redirect_uri": oauth_redirect_uri,
+        "oauth_redirect_uri": oauth_redirect_uri,
+        "listen_uri": listen_uri,
         "code_verifier": code_verifier,
         "oauth_state": oauth_state,
         "authorization_url": authorization_url,
@@ -909,7 +1063,7 @@ def _build_auth_code_state_doc(
     if scope:
         state["scope"] = scope
     return {
-        "version": 1,
+        "version": CURRENT_CONNECTION_VERSION,
         "endpoint": endpoint,
         "flow": "authorization_code",
         "state": state,
@@ -954,17 +1108,271 @@ def _build_authorization_request_url(
     return f"{authorization_endpoint}{sep}{urlparse.urlencode(params)}"
 
 
+def _normalize_public_callback_url(value: str) -> str:
+    text = value.strip()
+    parsed = urlparse.urlsplit(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("CALLBACK must be an absolute http:// or https:// URL")
+    if parsed.fragment:
+        raise ValueError("CALLBACK must not include a fragment")
+    path = parsed.path or "/callback"
+    return urlparse.urlunsplit(
+        (parsed.scheme, parsed.netloc, path, parsed.query, "")
+    )
+
+
+def _listen_uri_from_spec(spec: str | None) -> str | None:
+    if spec is None:
+        return None
+    text = spec.strip()
+    if not text:
+        return None
+
+    if "://" in text:
+        parsed = urlparse.urlsplit(text)
+        if parsed.scheme != "http" or not parsed.netloc:
+            raise ValueError("LISTEN must be PORT, HOST:PORT, or a local http:// URL")
+        if parsed.fragment or parsed.query:
+            raise ValueError("LISTEN URL must not include query or fragment")
+        path = parsed.path or "/callback"
+        return urlparse.urlunsplit(("http", parsed.netloc, path, "", ""))
+
+    host = "127.0.0.1"
+    port_text = text
+    if ":" in text:
+        host_part, _, port_part = text.rpartition(":")
+        host = host_part.strip()
+        port_text = port_part.strip()
+        if not host:
+            raise ValueError("LISTEN must be PORT, HOST:PORT, or a local http:// URL")
+    if not port_text.isdigit():
+        raise ValueError("LISTEN must be PORT, HOST:PORT, or a local http:// URL")
+    port = int(port_text)
+    if port < 0 or port > 65535:
+        raise ValueError("LISTEN port must be in range 0..65535")
+    return f"http://{host}:{port}/callback"
+
+
+def build_callback_target(
+    *,
+    listen: str | None,
+    target_host: str | None = None,
+) -> dict[str, Any]:
+    listen_url = _resolve_callback_listen_url(listen)
+    target_url = _build_callback_target_url(listen_url, target_host=target_host)
+    parts = _parse_local_listen_url(listen_url)
+    return {
+        "listen_url": listen_url,
+        "target_url": target_url,
+        "callback_path": parts.path or "/callback",
+        "port": int(parts.port or 0),
+    }
+
+
+def resolve_callback_proxy_target(forward_to: str) -> str:
+    try:
+        resolved = build_callback_target(listen=forward_to)
+    except ValueError:
+        return _normalize_callback_proxy_target_url(forward_to)
+    return str(resolved["target_url"])
+
+
+def start_callback_proxy(*, listen: str, target: str) -> CallbackProxyHandle:
+    listen_uri = _resolve_callback_listen_url(listen)
+    target_url = _normalize_callback_proxy_target_url(target)
+    parts = _parse_local_listen_url(listen_uri)
+    callback_path = parts.path or "/callback"
+    bind_port = parts.port or 0
+    host = parts.hostname or "127.0.0.1"
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            req = urlparse.urlsplit(self.path)
+            if req.path != callback_path:
+                body = b"Not found.\n"
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            forward_url = _build_callback_proxy_forward_url(target_url, req.query)
+            LOGGER.info(
+                "auth.callback_proxy forward listen_path=%s target=%s",
+                req.path,
+                forward_url,
+            )
+            status, content_type, body = _forward_callback_proxy_request(forward_url)
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+            return
+
+    server = ThreadingHTTPServer((host, bind_port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    actual_port = server.server_address[1]
+    effective_listen = urlparse.urlunsplit(
+        ("http", f"{host}:{actual_port}", callback_path, "", "")
+    )
+    LOGGER.info(
+        "auth.callback_proxy started listen_uri=%s target=%s",
+        effective_listen,
+        target_url,
+    )
+    return CallbackProxyHandle(
+        server=server,
+        thread=thread,
+        listen_uri=effective_listen,
+        target_url=target_url,
+        callback_path=callback_path,
+    )
+
+
+def stop_callback_proxy(handle: CallbackProxyHandle) -> None:
+    try:
+        handle.server.shutdown()
+        handle.server.server_close()
+    finally:
+        handle.thread.join(timeout=2.0)
+        LOGGER.info(
+            "auth.callback_proxy stopped listen_uri=%s target=%s",
+            handle.listen_uri,
+            handle.target_url,
+        )
+
+
+def _normalize_callback_proxy_target_url(value: str) -> str:
+    text = value.strip()
+    parsed = urlparse.urlsplit(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("TARGET must be an absolute http:// or https:// URL")
+    if parsed.fragment:
+        raise ValueError("TARGET must not include a fragment")
+    path = parsed.path or "/callback"
+    return urlparse.urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+
+
+def _resolve_callback_listen_url(spec: str | None) -> str:
+    listen_uri = _listen_uri_from_spec(spec) or "http://127.0.0.1:0/callback"
+    parts = _parse_local_listen_url(listen_uri)
+    host = parts.hostname or "127.0.0.1"
+    port = parts.port
+    if port in {None, 0}:
+        port = _find_available_callback_port(host)
+    path = parts.path or "/callback"
+    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return urlparse.urlunsplit(("http", f"{host_part}:{port}", path, "", ""))
+
+
+def _parse_local_listen_url(listen_uri: str) -> urlparse.SplitResult:
+    parts = urlparse.urlsplit(listen_uri)
+    if parts.scheme != "http" or parts.hostname not in {
+        "127.0.0.1",
+        "localhost",
+        "0.0.0.0",
+    }:
+        raise ValueError(
+            "listen target must be local http://127.0.0.1:<port>/..., http://localhost:<port>/..., or http://0.0.0.0:<port>/..."
+        )
+    if parts.query or parts.fragment:
+        raise ValueError("listen target must not include query or fragment")
+    return parts
+
+
+def _find_available_callback_port(host: str) -> int:
+    bind_host = "127.0.0.1" if host == "localhost" else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((bind_host, 0))
+        return int(sock.getsockname()[1])
+
+
+def _build_callback_target_url(listen_url: str, *, target_host: str | None) -> str:
+    parts = _parse_local_listen_url(listen_url)
+    host = _normalize_callback_target_host(target_host, listen_host=parts.hostname or "")
+    port = int(parts.port or 0)
+    path = parts.path or "/callback"
+    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return urlparse.urlunsplit(("http", f"{host_part}:{port}", path, "", ""))
+
+
+def _normalize_callback_target_host(
+    target_host: str | None,
+    *,
+    listen_host: str,
+) -> str:
+    if target_host is None:
+        if listen_host == "0.0.0.0":
+            return "127.0.0.1"
+        return listen_host
+
+    value = target_host.strip()
+    if not value:
+        raise ValueError("TARGET_HOST must not be empty")
+    if any(ch in value for ch in "/?#"):
+        raise ValueError("TARGET_HOST must be a hostname or IP address")
+    if "://" in value:
+        raise ValueError("TARGET_HOST must be a hostname or IP address")
+    return value
+
+
+def _build_callback_proxy_forward_url(target_url: str, raw_query: str) -> str:
+    parts = urlparse.urlsplit(target_url)
+    query = parts.query
+    if raw_query:
+        query = f"{query}&{raw_query}" if query else raw_query
+    return urlparse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path or "/callback", query, "")
+    )
+
+
+def _forward_callback_proxy_request(forward_url: str) -> tuple[int, str, bytes]:
+    req = urlrequest.Request(
+        url=forward_url,
+        method="GET",
+        headers={"Accept": "text/plain, application/json;q=0.9, */*;q=0.1"},
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=30.0) as resp:
+            status = int(getattr(resp, "status", 200))
+            content_type = (
+                resp.headers.get("Content-Type") or "text/plain; charset=utf-8"
+            )
+            body = resp.read()
+            return status, content_type, body
+    except urlerror.HTTPError as exc:
+        content_type = exc.headers.get("Content-Type") or "text/plain; charset=utf-8"
+        body = exc.read()
+        return int(exc.code), content_type, body
+    except urlerror.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        body = (
+            f"Callback proxy failed to reach upstream callback listener: {reason}\n"
+        ).encode("utf-8")
+        return 502, "text/plain; charset=utf-8", body
+
+
 def _start_oauth_callback_listener(
-    redirect_uri: str | None,
+    listen_uri: str | None,
     expected_state: str,
 ) -> OAuthCallbackServerHandle:
-    if not redirect_uri:
-        redirect_uri = "http://127.0.0.1:0/callback"
+    if not listen_uri:
+        listen_uri = "http://127.0.0.1:0/callback"
 
-    parts = urlparse.urlsplit(redirect_uri)
-    if parts.scheme != "http" or parts.hostname not in {"127.0.0.1", "localhost"}:
+    parts = urlparse.urlsplit(listen_uri)
+    if parts.scheme != "http" or parts.hostname not in {
+        "127.0.0.1",
+        "localhost",
+        "0.0.0.0",
+    }:
         raise ValueError(
-            "redirect_uri must be local http://127.0.0.1:<port>/... or http://localhost:<port>/..."
+            "listen target must be local http://127.0.0.1:<port>/..., http://localhost:<port>/..., or http://0.0.0.0:<port>/..."
         )
 
     callback_path = parts.path or "/"
@@ -1011,10 +1419,18 @@ def _start_oauth_callback_listener(
     thread.start()
 
     actual_port = server.server_address[1]
-    effective_redirect = urlparse.urlunsplit(
+    effective_listen = urlparse.urlunsplit(
         ("http", f"{host}:{actual_port}", callback_path, "", "")
     )
-    LOGGER.info("auth.callback_listener started redirect_uri=%s", effective_redirect)
+    redirect_host = "127.0.0.1" if host == "0.0.0.0" else host
+    effective_redirect = urlparse.urlunsplit(
+        ("http", f"{redirect_host}:{actual_port}", callback_path, "", "")
+    )
+    LOGGER.info(
+        "auth.callback_listener started listen_uri=%s redirect_uri=%s",
+        effective_listen,
+        effective_redirect,
+    )
     return OAuthCallbackServerHandle(
         server=server,
         thread=thread,
@@ -1022,6 +1438,7 @@ def _start_oauth_callback_listener(
         result=result,
         expected_state=expected_state,
         callback_path=callback_path,
+        listen_uri=effective_listen,
         redirect_uri=effective_redirect,
     )
 
@@ -1241,12 +1658,12 @@ def _probe_mcp_auth(endpoint: str) -> dict[str, str]:
         "params": {
             "protocolVersion": "2025-03-26",
             "capabilities": {},
-            "clientInfo": {"name": "mcat-cli", "version": "0.1.0"},
+            "clientInfo": {"name": "mcat-cli", "version": _VERSION},
         },
     }
     body = json.dumps(probe_json, separators=(",", ":")).encode("utf-8")
     headers = {
-        "User-Agent": "mcat-cli/0.1",
+        "User-Agent": _USER_AGENT,
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
     }
@@ -1317,7 +1734,7 @@ def _http_json(
     if form is not None and json_body is not None:
         raise ValueError("internal error: form and json_body are mutually exclusive")
     headers = {
-        "User-Agent": "mcat-cli/0.1",
+        "User-Agent": _USER_AGENT,
     }
     data: bytes | None = None
     if form is not None:
@@ -1729,12 +2146,6 @@ def _sanitize_error_snippet(text: str) -> str:
     return compact
 
 
-def _require_state_file_for_pending(path: str | None) -> str:
-    if not path:
-        raise ValueError("internal error: missing auth state file for pending result")
-    return path
-
-
 def _print_wait_instructions(device_flow: dict[str, Any]) -> None:
     url = _as_optional_str(
         device_flow.get("verification_uri_complete")
@@ -1765,10 +2176,17 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
-def _require_state_str(state: dict[str, Any], key: str) -> str:
+def _require_state_str(
+    state: dict[str, Any],
+    key: str,
+    *,
+    fallback_key: str | None = None,
+) -> str:
     value = _as_optional_str(state.get(key))
+    if not value and fallback_key:
+        value = _as_optional_str(state.get(fallback_key))
     if not value:
-        raise ValueError(f"invalid auth state file: missing {key}")
+        raise ValueError(f"invalid connection file: missing {key}")
     return value
 
 
@@ -1776,6 +2194,13 @@ def _require_state_like(source: dict[str, Any], key: str) -> str:
     value = _as_optional_str(source.get(key))
     if not value:
         raise ValueError(f"internal error: missing {key}")
+    return value
+
+
+def _require_connection_str(conn_doc: dict[str, Any], key: str) -> str:
+    value = _as_optional_str(conn_doc.get(key))
+    if not value:
+        raise ValueError(f"invalid connection file: missing {key}")
     return value
 
 
