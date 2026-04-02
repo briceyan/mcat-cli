@@ -25,11 +25,11 @@ uv tool install mcat-cli
 2. Parse `{"ok":true|false,...}` for normal commands.
 3. Treat non-zero exit as failure.
 4. Use explicit files:
-   - auth state: `--state AUTH_STATE_FILE`
+   - connection file: `-c/--connection CONNECTION_FILE`
    - token/key destination/source: `-k/--key-ref`
-   - session info: `-o/--out` for `init`, `-s/--session` for follow-up commands
+   - session info: `-s/--session SESSION_INFO_FILE`
 5. Start from endpoint + progressive disclosure:
-   - auth -> init -> tool list -> targeted calls
+   - auth/bridge start -> init -> tool list -> targeted calls
 6. Keep logs off unless debugging.
 
 ## Help and Command Shape
@@ -56,7 +56,8 @@ Examples:
 - use token/PAT from environment:
 
 ```bash
-mcat init ENDPOINT -k env://MCP_TOKEN -o sess.json
+mcat auth ENDPOINT -c conn.json -k env://MCP_TOKEN
+mcat init -c conn.json -s sess.json
 ```
 
 - use token/PAT from `.env`:
@@ -72,28 +73,29 @@ For GitHub MCP use, existing PAT can be supplied through these env forms.
 Default non-blocking flow:
 
 ```bash
-mcat auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE
-mcat auth continue --state AUTH_STATE_FILE -k KEY_REF
+mcat auth ENDPOINT -c CONNECTION_FILE -k KEY_REF
+mcat auth -c CONNECTION_FILE --complete
 ```
 
-`auth start` returns action details for browser approval; then resume with `auth continue`.
+`auth` returns action details for browser approval when the flow is pending; then resume with `auth --complete`.
 
 Human direct flow:
 
 ```bash
-mcat auth start ENDPOINT -k KEY_REF --state AUTH_STATE_FILE --wait
+mcat auth ENDPOINT -c CONNECTION_FILE -k KEY_REF --complete
 ```
 
 Behavior notes:
-- If existing token in `KEY_REF` is valid, `auth start` may complete immediately.
+- If existing token in `KEY_REF` is valid, `auth` may complete immediately.
 - Provider error details are surfaced when available (`error_description`, `error`, `message`, `detail`, `title`).
+- For callback-proxy/container flows, use `--callback URL` and optionally `--listen ADDR`.
 
 ## OAuth Client Config
 
 Use when provider requires specific OAuth client settings (for example, pre-registered clients such as common Linear setups).
 
-`auth start` options:
-- `-c/--client CLIENT_INFO_FILE`
+`auth` options:
+- `--client CLIENT_INFO_FILE`
 - `--client-id ID`
 - `--client-secret KEY_SPEC`
 - `--client-name NAME`
@@ -115,7 +117,7 @@ Modes:
 ## Session Init and Stateless Servers
 
 ```bash
-mcat init ENDPOINT -k KEY_REF -o SESSION_INFO_FILE
+mcat init -c CONNECTION_FILE -s SESSION_INFO_FILE
 ```
 
 If server omits `mcp-session-id`, init still succeeds and session is stored as stateless:
@@ -123,6 +125,14 @@ If server omits `mcp-session-id`, init still succeeds and session is stored as s
 - no `session_id`
 
 If server returns `mcp-session-id`, session is stateful.
+
+## STDIO Bridge
+
+```bash
+mcat bridge start -c CONNECTION_FILE -- CMD [ARG...]
+mcat init -c CONNECTION_FILE -s SESSION_INFO_FILE
+mcat bridge stop -c CONNECTION_FILE
+```
 
 ## MCP Calls
 
@@ -169,14 +179,22 @@ printf '%s\n' "$resp" | jq '.result'
 
 Global log options must appear before the command name.
 
-Basic domain logs:
+`-v` sets the default log level for standard modules. `--log` overrides specific modules.
+
+Info-level logs:
 
 ```bash
-mcat --log auth --log mcp --log app --log-stderr auth start ...
+mcat -v auth ...
 ```
 
-HTTP body level debug:
+Debug-level logs:
 
 ```bash
-mcat --log auth:debug --log mcp:debug --log app:debug --log-stderr auth start ...
+mcat -vv auth ...
+```
+
+Per-module overrides:
+
+```bash
+mcat -v --log auth:debug,mcp:debug auth ...
 ```

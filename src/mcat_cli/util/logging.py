@@ -3,12 +3,16 @@ from __future__ import annotations
 import logging
 from typing import Mapping
 
-LOG_DOMAINS = {
+LOG_DOMAIN_TO_LOGGER = {
     "app": "mcat.app",
     "auth": "mcat.auth",
-    "proxy": "mcat.proxy",
+    "bridge": "mcat.bridge",
     "mcp": "mcat.mcp",
 }
+LOG_DOMAIN_ALIASES = {
+    "proxy": "bridge",
+}
+DEFAULT_VERBOSE_DOMAINS = ("app", "auth", "bridge", "mcp")
 
 LOG_LEVELS = {
     "critical": logging.CRITICAL,
@@ -28,16 +32,56 @@ def parse_log_level(value: str) -> int:
     return level
 
 
+def normalize_log_domain(value: str) -> str:
+    domain = value.lower()
+    domain = LOG_DOMAIN_ALIASES.get(domain, domain)
+    if domain not in LOG_DOMAIN_TO_LOGGER:
+        allowed = ", ".join(
+            sorted((*LOG_DOMAIN_TO_LOGGER.keys(), *LOG_DOMAIN_ALIASES.keys()))
+        )
+        raise ValueError(
+            f"invalid log domain '{value}' (expected one of: {allowed})"
+        )
+    return domain
+
+
 def parse_log_specs(specs: list[str]) -> dict[str, int]:
     enabled: dict[str, int] = {}
-    for spec in specs:
+    for spec in _iter_log_specs(specs):
         domain, sep, level_name = spec.partition(":")
-        if domain not in LOG_DOMAINS:
-            allowed = ", ".join(LOG_DOMAINS)
-            raise ValueError(
-                f"invalid log domain '{domain}' (expected one of: {allowed})"
-            )
-        enabled[domain] = parse_log_level(level_name) if sep else logging.INFO
+        normalized = normalize_log_domain(domain)
+        enabled[normalized] = parse_log_level(level_name) if sep else logging.INFO
+    return enabled
+
+
+def _iter_log_specs(specs: list[str]) -> list[str]:
+    items: list[str] = []
+    for raw in specs:
+        for part in raw.split(","):
+            spec = part.strip()
+            if spec:
+                items.append(spec)
+    return items
+
+
+def level_from_verbosity(verbosity: int) -> int | None:
+    if verbosity <= 0:
+        return None
+    if verbosity == 1:
+        return logging.INFO
+    return logging.DEBUG
+
+
+def resolve_enabled_logs(
+    *,
+    verbosity: int,
+    specs: list[str] | None,
+) -> dict[str, int]:
+    enabled: dict[str, int] = {}
+    base_level = level_from_verbosity(verbosity)
+    if base_level is not None:
+        enabled.update({domain: base_level for domain in DEFAULT_VERBOSE_DOMAINS})
+    enabled.update(parse_log_specs(specs or []))
     return enabled
 
 
@@ -45,7 +89,7 @@ def configure_logging(
     *, enabled: Mapping[str, int], log_stderr: bool, log_file: str | None
 ) -> None:
     # Reset only our domain loggers so repeated invocations in-process don't duplicate handlers.
-    for logger_name in LOG_DOMAINS.values():
+    for logger_name in set(LOG_DOMAIN_TO_LOGGER.values()):
         logger = logging.getLogger(logger_name)
         logger.handlers.clear()
         logger.propagate = False
@@ -74,7 +118,7 @@ def configure_logging(
         handlers.append(file_handler)
 
     for domain, level in enabled.items():
-        logger = logging.getLogger(LOG_DOMAINS[domain])
+        logger = logging.getLogger(LOG_DOMAIN_TO_LOGGER[normalize_log_domain(domain)])
         logger.setLevel(level)
         for handler in handlers:
             logger.addHandler(handler)

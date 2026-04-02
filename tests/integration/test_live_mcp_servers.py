@@ -123,7 +123,7 @@ class LiveMcpServersTest(unittest.TestCase):
         self,
         *,
         endpoint: str,
-        state_file: Path,
+        connection_file: Path,
         token_file: Path,
         cwd: str,
         extra_start_args: list[str] | None = None,
@@ -132,12 +132,11 @@ class LiveMcpServersTest(unittest.TestCase):
             "--log",
             "auth:debug",
             "auth",
-            "start",
             endpoint,
+            "-c",
+            str(connection_file),
             "-k",
             str(token_file),
-            "--state",
-            str(state_file),
         ]
         if extra_start_args:
             args.extend(extra_start_args)
@@ -153,29 +152,29 @@ class LiveMcpServersTest(unittest.TestCase):
     def test_github_auth_start_no_wait_default_client_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            state_file = temp_path / "github.auth.json"
+            connection_file = temp_path / "github.connection.json"
             token_file = temp_path / "github.token.json"
 
             result = self._start_no_wait_auth(
                 endpoint=GITHUB_ENDPOINT,
-                state_file=state_file,
+                connection_file=connection_file,
                 token_file=token_file,
                 cwd=temp_dir,
             )
             payload = self._assert_ok(result)
             self._assert_pending_payload(payload)
-            self.assertTrue(state_file.exists())
+            self.assertTrue(connection_file.exists())
             self.assertIn("dynamic_client_name_source=default", result.stderr)
 
     def test_figma_auth_start_no_wait_with_client_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            state_file = temp_path / "figma.auth.json"
+            connection_file = temp_path / "figma.connection.json"
             token_file = temp_path / "figma.token.json"
 
             result = self._start_no_wait_auth(
                 endpoint=FIGMA_ENDPOINT,
-                state_file=state_file,
+                connection_file=connection_file,
                 token_file=token_file,
                 cwd=temp_dir,
                 extra_start_args=["--client-name", FIGMA_CLIENT_NAME],
@@ -187,7 +186,7 @@ class LiveMcpServersTest(unittest.TestCase):
             if result.returncode == 0:
                 payload = self._assert_ok(result)
                 self._assert_pending_payload(payload)
-                self.assertTrue(state_file.exists())
+                self.assertTrue(connection_file.exists())
                 return
 
             payload = self._assert_error(result)
@@ -197,18 +196,18 @@ class LiveMcpServersTest(unittest.TestCase):
     def test_linear_auth_start_no_wait_default_client_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            state_file = temp_path / "linear.auth.json"
+            connection_file = temp_path / "linear.connection.json"
             token_file = temp_path / "linear.token.json"
 
             result = self._start_no_wait_auth(
                 endpoint=LINEAR_ENDPOINT,
-                state_file=state_file,
+                connection_file=connection_file,
                 token_file=token_file,
                 cwd=temp_dir,
             )
             payload = self._assert_ok(result)
             self._assert_pending_payload(payload)
-            self.assertTrue(state_file.exists())
+            self.assertTrue(connection_file.exists())
             self.assertIn("dynamic_client_name_source=default", result.stderr)
 
     def _run_interactive_no_wait_then_continue(
@@ -221,12 +220,12 @@ class LiveMcpServersTest(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            state_file = temp_path / f"{provider_name}.interactive.auth.json"
+            connection_file = temp_path / f"{provider_name}.interactive.connection.json"
             token_file = temp_path / f"{provider_name}.interactive.token.json"
 
             start_result = self._start_no_wait_auth(
                 endpoint=endpoint,
-                state_file=state_file,
+                connection_file=connection_file,
                 token_file=token_file,
                 cwd=temp_dir,
                 extra_start_args=extra_start_args,
@@ -238,10 +237,10 @@ class LiveMcpServersTest(unittest.TestCase):
                 lowered = error_text.lower()
                 if any(pat in lowered for pat in allow_start_error_contains):
                     self.skipTest(
-                        f"{provider_name}: no-wait auth start unavailable in this environment: {error_text}"
+                        f"{provider_name}: pending auth unavailable in this environment: {error_text}"
                     )
                 self.fail(
-                    f"{provider_name}: auth start failed unexpectedly: {error_text}\n"
+                    f"{provider_name}: auth failed unexpectedly: {error_text}\n"
                     f"stderr={start_result.stderr}"
                 )
 
@@ -259,11 +258,9 @@ class LiveMcpServersTest(unittest.TestCase):
                     "--log",
                     "auth:info",
                     "auth",
-                    "continue",
-                    "--state",
-                    str(state_file),
-                    "-k",
-                    str(token_file),
+                    "-c",
+                    str(connection_file),
+                    "--complete",
                 ],
                 cwd=temp_dir,
                 timeout=DEFAULT_WAIT_TIMEOUT_S,
@@ -276,7 +273,7 @@ class LiveMcpServersTest(unittest.TestCase):
 
     @unittest.skipUnless(
         INTERACTIVE_AUTH_ENABLED,
-        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive no-wait auth continuation tests",
+        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive auth completion tests",
     )
     def test_github_auth_no_wait_then_continue_completes(self) -> None:
         self._run_interactive_no_wait_then_continue(
@@ -289,7 +286,7 @@ class LiveMcpServersTest(unittest.TestCase):
 
     @unittest.skipUnless(
         INTERACTIVE_AUTH_ENABLED,
-        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive no-wait auth continuation tests",
+        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive auth completion tests",
     )
     def test_figma_auth_no_wait_then_continue_completes(self) -> None:
         self._run_interactive_no_wait_then_continue(
@@ -301,7 +298,7 @@ class LiveMcpServersTest(unittest.TestCase):
 
     @unittest.skipUnless(
         INTERACTIVE_AUTH_ENABLED,
-        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive no-wait auth continuation tests",
+        "set MCAT_IT_INTERACTIVE_AUTH=1 to run interactive auth completion tests",
     )
     def test_linear_auth_no_wait_then_continue_completes(self) -> None:
         self._run_interactive_no_wait_then_continue(

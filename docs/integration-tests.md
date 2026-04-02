@@ -11,8 +11,8 @@ Endpoints are hardcoded in the test module:
 ## Flags
 
 - `MCAT_IT=1`: enable live integration tests
-- `MCAT_IT_INTERACTIVE_AUTH=1`: enable interactive no-wait auth completion tests
-- `MCAT_IT_WAIT_TIMEOUT=<seconds>`: timeout for interactive continue step (default `420`)
+- `MCAT_IT_INTERACTIVE_AUTH=1`: enable interactive pending auth completion tests
+- `MCAT_IT_WAIT_TIMEOUT=<seconds>`: timeout for interactive completion step (default `420`)
 
 ## Run (easy)
 
@@ -22,12 +22,12 @@ Run non-interactive coverage:
 MCAT_IT=1 uv run python -m unittest tests.integration.test_live_mcp_servers -v
 ```
 
-This covers no-wait `auth start` for:
+This covers pending `auth` runs for:
 - GitHub (default client mode)
 - Figma (provided `--client-name mcat-cli-it`)
 - Linear (default client mode)
 
-Run interactive no-wait completion tests (`auth start` + `auth continue`) for GitHub/Figma/Linear:
+Run interactive completion tests (`auth` + `auth --complete`) for GitHub/Figma/Linear:
 
 ```bash
 MCAT_IT=1 MCAT_IT_INTERACTIVE_AUTH=1 \
@@ -36,8 +36,8 @@ uv run python -m unittest tests.integration.test_live_mcp_servers -v
 
 During interactive tests:
 - each test prints an auth URL
-- open the URL in browser and approve access
-- test then completes via `auth continue`
+- open the URL in the browser and approve access
+- the test then completes via `auth --complete`
 
 ## Notes
 

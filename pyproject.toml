@@ -1,6 +1,6 @@
 [project]
 name = "mcat-cli"
-version = "0.1.8"
+version = "0.2.0"
 description = "The model-context access tool for agents and humans"
 readme = "README.md"
 license = "MIT"
